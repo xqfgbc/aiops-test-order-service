@@ -1,0 +1,30 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: order-service
+  # ⚠️ 场景2 缺陷：故意不配 Feign read-timeout，下游挂起时无限等待
+  # 修复时加：
+  #   spring:
+  #     cloud:
+  #       openfeign:
+  #         client:
+  #           config:
+  #             default:
+  #               read-timeout: 3000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+
+warranty:
+  service-url: http://warranty-service:8080
+
+quotation:
+  temp-dir: /data/tmp
