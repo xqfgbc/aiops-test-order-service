@@ -53,6 +53,20 @@ public class QuotationService {
         }
     }
 
+    /** 报价单摘要（场景3 被测）。 */
+    public String quotationSummary(String orderId) {
+        String template = loadTemplate(orderId);
+        log.info("渲染报价单摘要 orderId={}", orderId);
+        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
+        return template.trim();
+    }
+
+    /** 模拟模板仓库/配置中心查询：查不到时返回 null（不做兜底） */
+    private String loadTemplate(String orderId) {
+        log.warn("报价单模板加载失败，返回 null orderId={}", orderId);
+        return null;
+    }
+
     /** 供 /test/leak 快速填盘 */
     public int leakFiles(int count, int sizeMb) throws IOException {
         File dir = new File(tempDir);
@@ -71,4 +85,5 @@ public class QuotationService {
         log.warn("leakFiles 写入 {} 个文件（各 {}MB）", created, sizeMb);
         return created;
     }
+
 }
