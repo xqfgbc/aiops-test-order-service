@@ -23,14 +23,19 @@ public class QuotationService {
     @Value("${quotation.temp-dir:/data/tmp}")
     private String tempDir;
 
-    // ⚠️ 场景1 bug 开关：QUOTATION_TEMP_LEAK=true 时泄漏临时文件（不清理）→ 磁盘写满
-    @Value("${quotation.temp-leak:false}")
-    private boolean tempLeak;
+    // 磁盘可用空间下限（bytes）：低于则拒绝生成，避免 createTempFile 抛 IOException
+    @Value("${quotation.min-free-bytes:10485760}")
+    private long minFreeBytes;
 
     public byte[] generateQuotation(String orderId) {
         File dir = new File(tempDir);
-        if (!dir.exists()) {
-            dir.mkdirs();
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new QuotationException("临时目录不可用: " + tempDir);
+        }
+        // fix-6：创建临时文件前检查可用空间，磁盘满时优雅降级返回明确业务错误
+        if (dir.getUsableSpace() < minFreeBytes) {
+            throw new QuotationException("磁盘空间不足（可用 " + dir.getUsableSpace()
+                    + " bytes，低于阈值 " + minFreeBytes + " bytes），无法生成报价单");
         }
         File tmp = null;
         try {
@@ -44,10 +49,11 @@ public class QuotationService {
             return content;
         } catch (IOException e) {
             log.error("生成报价单失败: {}", e.toString(), e);
-            throw new QuotationException("生成报价单失败", e);
+            // fix-5：保留原始根因消息与堆栈，便于后续排查
+            throw new QuotationException("生成报价单失败: " + e.getMessage(), e);
         } finally {
-            // ⚠️ bug 注入点：tempLeak=true 时不删除临时文件，模拟「finally 未清理」
-            if (tmp != null && tmp.exists() && !tempLeak) {
+            // fix-4：无条件删除临时文件（不受 temp-leak 开关影响），杜绝 /data/tmp 泄漏
+            if (tmp != null && tmp.exists()) {
                 tmp.delete();
             }
         }
