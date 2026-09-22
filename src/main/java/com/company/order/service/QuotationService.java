@@ -23,8 +23,11 @@ public class QuotationService {
     @Value("${quotation.temp-dir:/data/tmp}")
     private String tempDir;
 
-    // ⚠️ 场景1 bug 开关：QUOTATION_TEMP_LEAK=true 时泄漏临时文件（不清理）→ 磁盘写满
+    // 保留该字段以兼容既有配置/装配（如 QUOTATION_TEMP_LEAK），
+    // 但临时文件清理已改为无条件执行：写盘路径不再产生残留文件，
+    // 任何取值都不可能再泄漏临时文件把 /data 卷写满。
     @Value("${quotation.temp-leak:false}")
+    @Deprecated
     private boolean tempLeak;
 
     public byte[] generateQuotation(String orderId) {
@@ -46,9 +49,12 @@ public class QuotationService {
             log.error("生成报价单失败: {}", e.toString(), e);
             throw new QuotationException("生成报价单失败", e);
         } finally {
-            // ⚠️ bug 注入点：tempLeak=true 时不删除临时文件，模拟「finally 未清理」
-            if (tmp != null && tmp.exists() && !tempLeak) {
-                tmp.delete();
+            // 修复：写盘路径（无论开关取值/成功失败分支）都必须清理临时文件，
+            // 避免残留文件把 memory-backed EmptyDir /data 写满后触发 ENOSPC。
+            if (tmp != null && tmp.exists()) {
+                if (!tmp.delete()) {
+                    log.warn("临时报价单文件删除失败，可能存在残留 file={}", tmp.getAbsolutePath());
+                }
             }
         }
     }

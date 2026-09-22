@@ -49,13 +49,12 @@ class QuotationServiceTest {
     }
 
     @Test
-    void generateQuotation_leavesTempFileWhenLeakSwitchIsOn(@TempDir Path tmp) throws IOException {
-        // 场景1 的 bug 开关（QUOTATION_TEMP_LEAK=true）：finally 不清理 → 反复调用写满磁盘。
-        // 这是**特征化测试**：钉住开关的现状，而不是断言它「正确」——
-        // 要验证修复，应当反过来断言 leak 开启时也不留文件。
+    void generateQuotation_cleansUpItsTempFileEvenWhenLeakSwitchIsOn(@TempDir Path tmp) throws IOException {
+        // 场景1 的 bug（QUOTATION_TEMP_LEAK=true 时 finally 不清理 → 写满磁盘）已修复：
+        // 现在无论开关如何取值，写盘路径都会清理临时文件，不再产生残留。
         service(tmp, true).generateQuotation("ORD-1003");
 
-        assertThat(countOf(tmp, "quotation_")).isEqualTo(1);
+        assertThat(countOf(tmp, "quotation_")).isZero();
     }
 
     @Test
