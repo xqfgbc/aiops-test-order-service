@@ -9,6 +9,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -53,18 +54,28 @@ public class QuotationService {
         }
     }
 
-    /** 报价单摘要（场景3 被测）。 */
+    /** 报价单摘要（场景3 被测，已修复）。 */
     public String quotationSummary(String orderId) {
-        String template = loadTemplate(orderId);
+        // 修复：loadTemplate() 返回 Optional，模板缺失时给出语义明确的受控业务异常，
+        // 不再让 null 跨方法边界传播到 template.trim() 触发裸 NPE。
+        String template = loadTemplate(orderId)
+                .orElseThrow(() -> {
+                    log.warn("报价单模板缺失，无法生成摘要 orderId={}", orderId);
+                    return new QuotationException(
+                            "报价单模板不存在，无法生成摘要: orderId=" + orderId, null);
+                });
         log.info("渲染报价单摘要 orderId={}", orderId);
-        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
         return template.trim();
     }
 
-    /** 模拟模板仓库/配置中心查询：查不到时返回 null（不做兜底） */
-    private String loadTemplate(String orderId) {
-        log.warn("报价单模板加载失败，返回 null orderId={}", orderId);
-        return null;
+    /**
+     * 模拟模板仓库/配置中心查询。
+     * 修复：收敛返回契约，不再静默返回 null，改为返回 {@link Optional}，
+     * 由调用方显式处理「未命中」分支，避免同类未判空 NPE 再次出现。
+     */
+    private Optional<String> loadTemplate(String orderId) {
+        log.warn("报价单模板加载失败，未命中任何模板 orderId={}", orderId);
+        return Optional.empty();
     }
 
     /** 供 /test/leak 快速填盘 */
