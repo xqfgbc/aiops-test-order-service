@@ -57,14 +57,23 @@ public class QuotationService {
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
         log.info("渲染报价单摘要 orderId={}", orderId);
-        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
+        // 修复（场景3 bug 注入点）：模板加载失败不再返回 null 由此处盲调 .trim()。
+        // loadTemplate 已改为抛受控业务异常；这里再保留一道防御性判空，
+        // 防止将来任何返回 null 的实现重新引入 NullPointerException。
+        if (template == null) {
+            throw new QuotationTemplateNotFoundException(orderId);
+        }
         return template.trim();
     }
 
-    /** 模拟模板仓库/配置中心查询：查不到时返回 null（不做兜底） */
+    /**
+     * 模拟模板仓库/配置中心查询。
+     * 修复（场景3 bug 注入点）：模板查不到时不再「仅打 WARN 后 return null」，
+     * 而是抛出受控业务异常，让失败在调用链上可见、语义明确，避免调用方 NPE。
+     */
     private String loadTemplate(String orderId) {
-        log.warn("报价单模板加载失败，返回 null orderId={}", orderId);
-        return null;
+        log.warn("报价单模板未找到 orderId={}", orderId);
+        throw new QuotationTemplateNotFoundException(orderId);
     }
 
     /** 供 /test/leak 快速填盘 */
@@ -84,6 +93,13 @@ public class QuotationService {
         }
         log.warn("leakFiles 写入 {} 个文件（各 {}MB）", created, sizeMb);
         return created;
+    }
+
+    /** 模板缺失时的受控业务异常，复用 order-service 既有业务异常体系。 */
+    public static class QuotationTemplateNotFoundException extends QuotationException {
+        public QuotationTemplateNotFoundException(String orderId) {
+            super("报价单模板不存在，无法生成摘要: orderId=" + orderId, null);
+        }
     }
 
 }

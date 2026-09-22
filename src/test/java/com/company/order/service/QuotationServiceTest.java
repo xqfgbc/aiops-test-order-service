@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * QuotationService 单元测试（场景1 的被测服务）。
@@ -66,6 +67,21 @@ class QuotationServiceTest {
         service(nested, false).generateQuotation("ORD-1004");
 
         assertThat(nested).exists();
+    }
+
+    /**
+     * 场景3 回归：模板缺失时不得抛出 NullPointerException，
+     * 而应抛出受控业务异常 {@link QuotationService.QuotationTemplateNotFoundException}。
+     */
+    @Test
+    void quotationSummary_throwsControlledExceptionInsteadOfNpeWhenTemplateMissing(@TempDir Path tmp) {
+        QuotationService svc = service(tmp, false);
+
+        assertThatThrownBy(() -> svc.quotationSummary("ORD-2001"))
+                .isInstanceOf(QuotationService.QuotationTemplateNotFoundException.class)
+                .isInstanceOf(QuotationException.class)
+                .hasMessageContaining("ORD-2001")
+                .isNotInstanceOf(NullPointerException.class);
     }
 
     @Test
