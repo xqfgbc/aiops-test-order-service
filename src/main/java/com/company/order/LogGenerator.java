@@ -40,6 +40,45 @@ public class LogGenerator {
         }
     }
 
+    /**
+     * 吐一批**同签名**的「瞬时故障、已自愈」ERROR —— 演示**诊断结论是「不是个问题」**的场景。
+     *
+     * <p>为什么必须是 ERROR、且必须同签名：日志监控的检测器是 {@code signature_aggregate}
+     * （域配置 {@code {"signal":"ERROR","min_count":5}}，按签名聚合）——
+     * **同签名不足 5 条不会开单**，也就触发不了诊断。低级别（WARN/INFO）同理不开单。
+     *
+     * <p>为什么不带堆栈：{@code signature()} 对无堆栈的日志**回退取 {@code message[:120}}**，
+     * 所以"同一条消息重复 N 次"本身就是一个签名。刻意不带栈，是为了**不让栈帧指向本服务的
+     * 代码** —— 这条日志要演示的正是"问题不在代码里"。
+     *
+     * <p>为什么文案是「已重试成功」：这**不是**缺陷 —— 下游抖了一下、应用自己恢复了。
+     * 问题单会开出来（检测只看 ERROR 突增），而诊断/人应当判定**不用处理**。
+     *
+     * <p>⚠️ 消息必须是**常量**：带上 orderId 之类的变量会让每条签名都不同，
+     * 于是聚合不出 LogAnomaly、一条单也开不出来。
+     *
+     * @return 实际写出的条数
+     */
+    public int emitTransientBurst(int count) {
+        for (int i = 0; i < count; i++) {
+            log.error("下游调用首次超时、重试已成功（瞬时抖动，非应用故障）: "
+                    + "warranty-service read timed out");
+            // ⚠️ **必须拉开间隔**：一次性连打 N 条会让它们的 `@timestamp` 完全相同，
+            // 而采集是按 `@timestamp` 的水位线增量下推（`start=last_ts`）——
+            // 同刻的 N 条会在窗口边界上被**劈开**，每轮只拿到一两条，
+            // 于是永远凑不齐检测器要的 min_count，**一条单也开不出来**。
+            // 实测踩过：6 条同一时刻的 ERROR → 两轮各采到 1 条 → anomaly_count=0。
+            // 真实故障天然是"隔一会儿报一次"，这里照那个形状来。
+            try {
+                Thread.sleep(400);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return count;
+    }
+
     public void stop() {
         if (running.getAndSet(false) && exec != null) {
             exec.shutdownNow();
