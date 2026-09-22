@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * QuotationService 单元测试（场景1 的被测服务）。
@@ -76,5 +77,20 @@ class QuotationServiceTest {
         assertThat(countOf(tmp, "leak_")).isEqualTo(3);
         // 与报价单是两套文件，别互相混淆
         assertThat(countOf(tmp, "quotation_")).isZero();
+    }
+
+    /**
+     * 场景3 回归：模板加载失败时抛**受控业务异常**，而不是 NullPointerException。
+     * 该用例在未打修复的历史版本上会因 NPE 而失败（断言异常类型不符），从而锁定缺陷。
+     */
+    @Test
+    void quotationSummary_throwsControlledExceptionWhenTemplateMissing(@TempDir Path tmp) {
+        QuotationService svc = service(tmp, false);
+
+        assertThatThrownBy(() -> svc.quotationSummary("ORD-1005"))
+                .isInstanceOf(QuotationTemplateNotFoundException.class)
+                .isInstanceOf(QuotationException.class)
+                .hasMessageContaining("ORD-1005")
+                .isNotInstanceOf(NullPointerException.class);
     }
 }

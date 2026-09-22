@@ -1,5 +1,6 @@
 package com.company.order.config;
 
+import com.company.order.service.QuotationException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -42,6 +43,18 @@ import java.io.IOException;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    /**
+     * 受控业务异常（如报价单模板缺失）：业务上拿不到数据，不是应用故障。
+     * 记 WARN 而不是 ERROR，避免污染基于 ERROR 级别的日志检测/告警；
+     * 响应码保持 500，与修复前对外表现一致（原来这里是 NPE 走兜底 500）。
+     */
+    @ExceptionHandler(QuotationException.class)
+    public void handleBusiness(QuotationException e, HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        log.warn("business exception: {} {} - {}", request.getMethod(), request.getRequestURI(), e.getMessage());
+        response.sendError(HttpStatus.INTERNAL_SERVER_ERROR.value());
+    }
 
     @ExceptionHandler(Exception.class)
     public void handle(Exception e, HttpServletRequest request, HttpServletResponse response) throws IOException {
