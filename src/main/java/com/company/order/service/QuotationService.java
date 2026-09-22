@@ -57,14 +57,23 @@ public class QuotationService {
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
         log.info("渲染报价单摘要 orderId={}", orderId);
-        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
+        // 防御性判空：模板缺失是受控业务异常，绝不能把 null 继续传给调用方（历史缺陷：此处 NPE）
+        if (template == null) {
+            throw new QuotationException("报价单模板缺失 orderId=" + orderId, null);
+        }
         return template.trim();
     }
 
-    /** 模拟模板仓库/配置中心查询：查不到时返回 null（不做兜底） */
+    /**
+     * 模拟模板仓库/配置中心查询。
+     *
+     * <p>修复：模板查不到时不再「打 WARN 后静默 return null」——异常被吞成 null 会让
+     * 调用方在无感知的情况下 NPE（见 quotationSummary）。这里改为记录 ERROR（带模板标识
+     * 上下文）并抛出受控业务异常，使失败在调用链上可见、语义明确。
+     */
     private String loadTemplate(String orderId) {
-        log.warn("报价单模板加载失败，返回 null orderId={}", orderId);
-        return null;
+        log.error("报价单模板加载失败 orderId={}", orderId);
+        throw new QuotationException("报价单模板加载失败 orderId=" + orderId, null);
     }
 
     /** 供 /test/leak 快速填盘 */

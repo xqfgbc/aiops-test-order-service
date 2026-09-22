@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * QuotationService 单元测试（场景1 的被测服务）。
@@ -66,6 +67,16 @@ class QuotationServiceTest {
         service(nested, false).generateQuotation("ORD-1004");
 
         assertThat(nested).exists();
+    }
+
+    @Test
+    void quotationSummary_throwsControlledBusinessExceptionWhenTemplateMissing(@TempDir Path tmp) {
+        // 场景3 回归：模板加载失败时不得抛 NPE，而应抛受控业务异常
+        QuotationService svc = service(tmp, false);
+
+        assertThatThrownBy(() -> svc.quotationSummary("ORD-2001"))
+                .isInstanceOf(QuotationException.class)
+                .hasMessageContaining("ORD-2001");
     }
 
     @Test
