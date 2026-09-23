@@ -1,0 +1,295 @@
+{
+  "info": {
+    "_postman_id": "8f2a1c7e-4b3d-4a91-9c6e-2d5f8a0b1c34",
+    "name": "aiops-test-order-service · 故障场景",
+    "description": "报价单接口（/quotation）上的 7 个故障场景，从外部触发并判读。\n\n用法：改 collection 变量 baseUrl 指向你的环境（测试床网关 http://localhost:18082，直连 http://localhost:18080，本地 http://localhost:8080），然后按顺序发请求。\n\n三条铁律：\n1) 换场景前先发「0 清日志窗口」，否则上一条的 ERROR 还在 ES 查询窗口里，会互相污染。\n2) 场景4/5 是并发型，单发请求永不触发；Collection Runner 是串行的，也不行。用「场景4/5」里的 burst 端点，或「备选」里的 Pre-request Script。\n3) 场景5 触发后服务整体卡死（/quotation 无响应，但 /actuator/health 仍 200），只能重启。它排最后。\n\n完整说明见仓库 docs/POSTMAN_SCENARIOS.md。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:18082",
+      "type": "string"
+    },
+    {
+      "key": "esUrl",
+      "value": "http://localhost:19200",
+      "type": "string"
+    },
+    {
+      "key": "orderId",
+      "value": "ORD001",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "0 清日志窗口（换场景前先发）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// 清掉上一场景的日志，避免污染下一场景的查询窗口",
+              "pm.test('已清空 app-logs 索引', () => pm.expect([200, 404]).to.include(pm.response.code));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": "{{esUrl}}/app-logs",
+        "description": "删除 ES 的 app-logs 索引，清掉上一个场景残留的 ERROR（否则日志检测器会把两个场景的日志算在一起）。404 = 本来就没有，也算成功。"
+      },
+      "response": []
+    },
+    {
+      "name": "场景7 日志风暴（单发）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 —— 请求本身是成功的', () => pm.response.to.have.status(200));",
+              "",
+              "// 明细行带常量日期，正确时应恒等于 2026-01-01 00:00:00",
+              "const lines = pm.response.text().split('\\n');",
+              "const items = lines.filter(l => l.includes('2026-01-01 00:00:00'));",
+              "pm.test('响应里带明细行（行数 = quotation.line-items，默认 500）', () => pm.expect(items.length).to.be.above(0));",
+              "",
+              "// 看不到的东西同样是判据：单请求会往日志里灌 items.length + 1 条 INFO",
+              "console.log(`本次请求对应约 ${lines.length} 行响应 → 日志里约 ${items.length + 1} 条 INFO`);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/quotation?orderId={{orderId}}",
+        "description": "场景7：循环里逐行打日志。\n\n期望：HTTP 200，但单请求在 ES 里打出数百条 INFO —— 日志量曲线陡增、ES 写入压力、同步 appender 拖慢请求。\n注意：全是 INFO，没有 ERROR，所以基于 ERROR 的日志检测器不会开单；这条是给「日志量突增」类检测用的。\n\norderId 必须以 ORD 开头（否则命中场景6 的 500）。"
+      },
+      "response": []
+    },
+    {
+      "name": "场景6 日志误报（单发）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('500 —— 调用方的错走了服务端错误（本该 400）', () => pm.response.to.have.status(500));",
+              "",
+              "// 日志里会出现**常量**签名，反复打就能攒够 min_count=5 开出问题单",
+              "pm.test('重复发这个请求，直到 Kibana 里出现常量签名「报价单参数校验失败: 订单号格式非法」', () => true);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/quotation?orderId=abc",
+        "description": "场景6：业务/参数校验失败（调用方问题）却记 log.error。\n\n期望：HTTP 500。ES 里两条 ERROR 签名：\n  - 常量签名「报价单参数校验失败: 订单号格式非法」（刻意不带插值，否则每条签名都不同、聚合不出 LogAnomaly）\n  - 框架兜底「unhandled exception: GET /quotation」\n\n重复发几次（同签名累积 ≥ 5 条，日志检测器 min_count=5）就会开出问题单 —— 而**期望的诊断结论是「误报」**：调用方问题不是应用故障。"
+      },
+      "response": []
+    },
+    {
+      "name": "场景4 SDF 竞态 · 短爆发（并发）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code !== 200) {",
+              "    pm.test('端点没返回——服务大概率已被场景5 死锁卡住，重启后重试', () => {});",
+              "    return;",
+              "}",
+              "const b = pm.response.json();",
+              "pm.test('竞态已触发：http5xx > 0（本机实测 80 请求里 16 个 500）', () => pm.expect(b.http5xx).to.be.above(0));",
+              "pm.test('没被死锁接管：timedOut == 0', () => pm.expect(b.timedOut).to.equal(0));",
+              "console.log('dispatched=' + b.dispatched + ' http5xx=' + b.http5xx + ' timedOut=' + b.timedOut);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{baseUrl}}/test/scenario/concurrent-burst?threads=8&rounds=10",
+        "description": "场景4：static 共享 SimpleDateFormat 非线程安全（parse/format 踩内部 Calendar）。\n\n并发型——单发请求永不触发。这里投递 80 个并发请求，跑不到一秒：\n  http5xx > 0  → 竞态抛了 NumberFormatException（堆栈指向 QuotationService.formatDeliveryDate）\n  响应里日期那一列不再等于常量 2026-01-01 00:00:00 → 静默算错（这一半要看响应体，端点本身只统计状态码）\n\n⚠️ 短爆发是刻意的：爆发一旦超过一个清理周期（默认 2s）就会先撞出场景5 的死锁。撞上了（timedOut > 0 或服务无响应）→ 重启再试。"
+      },
+      "response": []
+    },
+    {
+      "name": "场景5 ABBA 死锁 · 持续爆发（并发，排最后）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code !== 200) {",
+              "    pm.test('端点自己都没返回——Tomcat 线程已被占满，服务完全卡死', () => {});",
+              "    return;",
+              "}",
+              "const b = pm.response.json();",
+              "pm.test('有请求没拿到响应：timedOut > 0', () => pm.expect(b.timedOut).to.be.above(0));",
+              "console.log('dispatched=' + b.dispatched + ' completed=' + b.completed + ' timedOut=' + b.timedOut);",
+              "pm.test('接着发「场景5 判读」确认服务已无响应', () => true);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{baseUrl}}/test/scenario/concurrent-burst?threads=50&rounds=50",
+        "description": "场景5：两条代码路径以相反顺序抢两把锁 → ABBA 死锁。\n\n触发条件：某个请求在清理任务持有 fileLock 的窗口内去请求 fileLock。\n所以持续超过一个清理周期（默认 2s）的爆发必然撞上（本机实测一撞就死）。\n\ndispatched 是**投递**数（并发上限 threads，短窗口内只跑得完一部分），completed + timedOut 远小于它很正常。\n判据是 timedOut > 0，然后接「场景5 判读」。\n\n⚠️ 触发后 /quotation 全部无响应、/actuator/health 仍是 200，只能重启进程。"
+      },
+      "response": []
+    },
+    {
+      "name": "场景5 判读 · 单发请求应无响应",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let code = 0;",
+              "try { code = pm.response.code; } catch (e) { code = 0; }",
+              "",
+              "pm.test('服务已卡死：单发请求无响应（超时/无 code）', () => pm.expect(code === 0).to.be.true);",
+              "pm.test('提示：死锁时日志里**没有** ERROR，所以日志检测器抓不到它；只能从 APM 延迟/超时或线程指标开单', () => true);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/quotation?orderId={{orderId}}",
+        "description": "场景5 的判读步骤 2：死锁后单发请求也应无响应。\n\n⚠️ 先把 Postman 的 Request timeout 设短一点（Settings → General → Request timeout，例如 5000ms），\n否则这个请求会一直转圈。请求超时时 pm.response.code 为 0 —— 断言即通过。\n\n想进一步定案就抓线程 dump。⚠️ 容器是 eclipse-temurin:21-jre，没有 jstack/jcmd：\nkubectl -n order exec deploy/order-service -- kill -3 1        # SIGQUIT 只打线程栈，不杀进程\nkubectl -n order logs deploy/order-service --tail=300 | grep -A 6 'QuotationService'\n应看到两个线程互等两把锁（一个持 fileLock 等 templateLock，另一个反过来）。\n\n恢复：kubectl -n order rollout restart deploy/order-service"
+      },
+      "response": []
+    },
+    {
+      "name": "场景3 未判空 NPE（单发）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('500 + NPE 堆栈', () => pm.response.to.have.status(500));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/quotation/exception?orderId={{orderId}}",
+        "description": "场景3：模板加载失败返回 null，未判空直接 trim() → NullPointerException。\n\n期望：HTTP 500，Kibana 里能看到 QuotationService.quotationSummary 的 NPE 堆栈（带 traceId）。"
+      },
+      "response": []
+    },
+    {
+      "name": "场景1 填盘（测试床，要压磁盘时用）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 —— 已写入填盘文件', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{baseUrl}}/test/leak?count=200&sizeMb=1",
+        "description": "场景1：把 /data/tmp 写满（200 个 1MB 文件）。\n\n之后 GET /quotation 应返回 500 No space left on device；Prometheus 的 data_disk_free_bytes 掉底。\n\n💡 清理任务只删 quotation_* 前缀、且超过 10 分钟的过期文件，**不碰 leak_*.bin** —— 填盘证据安全。\n恢复：测试床 kubectl -n order rollout restart deploy/order-service；本地删掉临时目录即可。"
+      },
+      "response": []
+    },
+    {
+      "name": "场景2 结账挂起（需 warranty 侧已注入）",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 0) {",
+              "    pm.test('无响应（挂起）—— 下游 warranty-service 卡住 + Feign 没配 read-timeout', () => {});",
+              "} else {",
+              "    pm.test('已有响应（warranty 侧未注入故障时正常返回）', () => pm.response.to.have.status(200));",
+              "}",
+              "// 判读要点：Kibana 按同一个 traceId 关联 order-service 与 warranty-service 的日志"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{baseUrl}}/checkout?orderId={{orderId}}",
+        "description": "场景2：order-service → warranty-service 的 Feign 调用没配 read-timeout，下游挂起时无限等待。\n\n前置：平台侧先跑 fault-inject/scenario2.sh（给 warranty-service 注入 fin 缺参 + 吞异常）。\n期望：请求一直不返回（把 Postman 的 Request timeout 调短以便观察）。\n判读：Kibana 按 traceId 能把 order-service 与 warranty-service 的日志串起来。\n恢复：fault-inject/scenario2-recover.sh"
+      },
+      "response": []
+    },
+    {
+      "name": "备选 · 并发爆发（Pre-request Script 版）",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// 不发 burst 端点时的备选：脚本里循环 pm.sendRequest（不 await）= 全部同时在途。",
+              "// ⚠️ 回调不保证都执行（请求已发出、脚本已结束），不影响发压效果。",
+              "const base = pm.environment.get('baseUrl') || pm.collectionVariables.get('baseUrl');",
+              "const n = 200;",
+              "for (let i = 0; i < n; i++) {",
+              "    pm.sendRequest({",
+              "        url: base + '/quotation?orderId=ORD' + (100000 + i),",
+              "        method: 'GET',",
+              "        timeout: 8000",
+              "    }, (err, res) => {",
+              "        if (err) { console.log('timeout/failed:', err.message); }",
+              "    });",
+              "}",
+              "console.log('已并发派发 ' + n + ' 个 /quotation 请求');"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('爆发已派发（本次自身请求与爆发无关，200 即说明服务还活着）', () => pm.response.to.have.status(200));",
+              "pm.test('判读：随后看 Kibana 里的 ERROR 签名 / 单发请求是否无响应', () => true);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/actuator/health",
+        "description": "备选触发方式（不改代码、或 Postman 沙箱对 burst 端点有节流时用）。\n\nPre-request Script 里并发派发 200 个 /quotation，然后这个请求打 /actuator/health：\n  200  → 服务还活着（竞态的 500 要去 Kibana 看）\n  无响应 → 场景5 死锁已触发\n\n想专测场景4 就调小 n（例如 60），想触发场景5 就调大 n 并多按几次 Send。"
+      },
+      "response": []
+    }
+  ]
+}
