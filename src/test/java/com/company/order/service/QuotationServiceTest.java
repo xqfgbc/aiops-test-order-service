@@ -117,6 +117,16 @@ class QuotationServiceTest {
     }
 
     @Test
+    void quotationSummary_throwsControlledBusinessExceptionWhenTemplateMissing(@TempDir Path tmp) {
+        // 场景3 回归：模板加载失败时不得抛 NPE，而应抛受控业务异常
+        QuotationService svc = service(tmp, false);
+
+        assertThatThrownBy(() -> svc.quotationSummary("ORD-2001"))
+                .isInstanceOf(QuotationException.class)
+                .hasMessageContaining("ORD-2001");
+    }
+
+    @Test
     void leakFiles_createsRequestedNumberOfFiles(@TempDir Path tmp) throws IOException {
         int created = service(tmp, false).leakFiles(3, 1);
 
