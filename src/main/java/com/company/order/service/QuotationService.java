@@ -275,13 +275,7 @@ public class QuotationService {
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
         log.info("渲染报价单摘要 orderId={}", orderId);
-        // 场景3 修复：loadTemplate() 查不到模板时返回 null，原实现直接对 null 调 trim() → NPE → 500。
-        // 改为先判空：模板缺失属可预期的业务前置条件不满足，抛受控业务异常（而非 NPE），
-        // 并以 ERROR 记录模板键与请求参数，便于定位模板缺失的根因。
-        if (template == null) {
-            log.error("报价单模板缺失，无法渲染摘要 orderId={} templateKey={}", orderId, orderId);
-            throw new QuotationException("报价单模板缺失: orderId=" + orderId, null);
-        }
+        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
         return template.trim();
     }
 
