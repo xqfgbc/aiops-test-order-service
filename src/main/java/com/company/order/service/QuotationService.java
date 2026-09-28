@@ -2,6 +2,7 @@ package com.company.order.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -35,6 +36,9 @@ import java.util.UUID;
 public class QuotationService {
 
     private static final Logger log = LoggerFactory.getLogger(QuotationService.class);
+
+    /** 模板缺失时写入日志与异常的消息（常量，便于日志侧按签名聚合与告警）。 */
+    private static final String TEMPLATE_MISSING_MSG = "报价单模板缺失";
 
     /**
      * ⚠️ 场景4 bug 注入点：{@link SimpleDateFormat} 非线程安全（内部 Calendar/字段被 parse/format 改写），
@@ -275,7 +279,15 @@ public class QuotationService {
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
         log.info("渲染报价单摘要 orderId={}", orderId);
-        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
+        // 修复（原场景3 注入点）：loadTemplate 查不到模板时会返回 null，
+        // 直接 template.trim() 必然抛 NullPointerException（非受控，堆栈指向本类）。
+        // 这里补判空：模板缺失属**受控业务异常**，记 ERROR（带 orderId/traceId 便于定位）后
+        // 抛 QuotationException，由 GlobalExceptionHandler 统一处理；
+        // 不降级为 4xx、也不返回兜底默认模板（模板语义不变，loadTemplate 仍不做兜底）。
+        if (template == null) {
+            log.error(TEMPLATE_MISSING_MSG + " orderId={} traceId={}", orderId, MDC.get("traceId"));
+            throw new QuotationException(TEMPLATE_MISSING_MSG, null);
+        }
         return template.trim();
     }
 
