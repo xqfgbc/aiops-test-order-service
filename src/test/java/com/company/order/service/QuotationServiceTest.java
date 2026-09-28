@@ -33,6 +33,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>场景4（SimpleDateFormat 竞态）**本质是概率性的**：低并发下不复现，
  * 单测不跑竞态，只用反射钉住"共享 static 实例"这个注入事实。
+ *
+ * <p>场景3（{@code quotationSummary} 模板缺失）**已修复并回归钉住**：见
+ * {@link #quotationSummary_throwsControlledExceptionInsteadOfNpeWhenTemplateMissing}，
+ * 任何把该判空回滚掉的改动都会让 CI 立刻失败。
  */
 class QuotationServiceTest {
 
@@ -158,6 +162,35 @@ class QuotationServiceTest {
                     .filter(e -> e.getFormattedMessage().startsWith("报价单明细渲染"))
                     .count();
             assertThat(perItem).isEqualTo(TEST_LINE_ITEMS);
+        } finally {
+            detach(appender);
+        }
+    }
+
+    /**
+     * 场景3 回归用例（修复后行为）：模板缺失（{@code loadTemplate} 返回 null）时，
+     * {@code quotationSummary} 必须抛**受控的** {@link QuotationException}，
+     * 而不是让 null 流到 {@code template.trim()} 触发 {@link NullPointerException}。
+     *
+     * <p>这条用例的作用是"钉住"修复：任何再次回滚判空逻辑的改动都会让它失败。
+     */
+    @Test
+    void quotationSummary_throwsControlledExceptionInsteadOfNpeWhenTemplateMissing(@TempDir Path tmp) {
+        ListAppender<ILoggingEvent> appender = attach();
+        try {
+            assertThatThrownBy(() -> service(tmp, false).quotationSummary("ORD-1"))
+                    // 关键断言：是受控业务异常，而不是 NPE
+                    .isInstanceOf(QuotationException.class)
+                    .isNotInstanceOf(NullPointerException.class)
+                    .hasMessageContaining("报价单模板缺失");
+
+            // 缺失路径必须留下 ERROR（含 orderId 上下文），供日志监控/告警接住，不能静默
+            assertThat(appender.list)
+                    .filteredOn(e -> e.getLevel() == Level.ERROR)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(msg -> assertThat(msg)
+                            .contains("报价单模板缺失")
+                            .contains("ORD-1"));
         } finally {
             detach(appender);
         }
