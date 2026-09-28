@@ -49,12 +49,33 @@ public class GlobalExceptionHandler {
         // ErrorResponse：**保持原状态码，且不记 ERROR** —— 那是调用方问题、不是应用故障。
         // 记成 ERROR 会把客户端错误混进基于 ERROR 级别的日志监控。
         if (e instanceof ErrorResponse errorResponse) {
-            response.sendError(errorResponse.getStatusCode().value());
+            sendErrorIfPossible(response, errorResponse.getStatusCode().value());
             return;
         }
         // 真正的未处理异常。此刻 TraceFilter 的 finally 还没跑，MDC 里的 traceId 仍在，
         // 日志因此带上它 —— 这是本类存在的全部理由。
         log.error("unhandled exception: {} {}", request.getMethod(), request.getRequestURI(), e);
-        response.sendError(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        sendErrorIfPossible(response, HttpStatus.INTERNAL_SERVER_ERROR.value());
+    }
+
+    /**
+     * 仅在响应尚未提交时写出错误。
+     *
+     * <p>修复（观测断层）：原实现在此处无条件 {@code sendError}。当响应流已经被下游写过
+     * （{@code response.isCommitted()==true}）时，容器会抛
+     * {@code IllegalStateException: Cannot call sendError() after the response has been committed}，
+     * 该二次异常覆盖掉原始业务异常，使日志里只剩下与真实故障无关的
+     * {@code IllegalStateException} 噪音（rca 指出的「日志侧仅剩 actuator 抓取断连噪音」），
+     * 原始异常的 cause / traceId / 应用栈帧全部丢失，故障无法用日志定位。
+     *
+     * <p>因此先判 {@code isCommitted()}：已提交则不再写响应，原始异常已在上面完整记入日志
+     * （含 traceId），直接返回即可；未提交时才按原逻辑写出对应状态码。
+     */
+    private void sendErrorIfPossible(HttpServletResponse response, int status) throws IOException {
+        if (response.isCommitted()) {
+            // 响应已提交，无法再改状态码/写错误体：只保留原始异常记录，不再二次抛出。
+            return;
+        }
+        response.sendError(status);
     }
 }
