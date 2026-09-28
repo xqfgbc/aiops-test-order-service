@@ -34,7 +34,7 @@
 |---|---|---|---|
 | 1 磁盘写满 | `POST /test/leak` 或 `QUOTATION_TEMP_LEAK=true` 后反复 `GET /quotation` | 500 `No space left on device` | 临时文件未清理 → 磁盘 100% |
 | 2 Feign 无超时 | `POST /checkout`（warranty 侧注入挂起） | 无响应（一直转圈） | 下游挂起 + 没配 read-timeout |
-| 3 模板缺失（**已修复**） | `GET /quotation/exception` | 500 + 受控 `QuotationException`（`报价单模板缺失`）的 ERROR 日志（**不再有 NPE 堆栈**） | `loadTemplate` 返回 null 未兜底 → 判空后转受控业务异常 |
+| 3 未判空 NPE | `GET /quotation/exception` | 500 + NPE 堆栈 | `loadTemplate` 返回 null 未判空 |
 | 4 SDF 竞态 | `POST /test/scenario/concurrent-burst?threads=8&rounds=10` | 偶发 500（`NumberFormatException`）/ 响应里日期错乱 | 共享 `SimpleDateFormat` 非线程安全 |
 | 5 ABBA 死锁 | `POST /test/scenario/concurrent-burst?threads=50&rounds=50` | 请求全部无响应，**日志里没有 ERROR** | 两把锁获取顺序相反 |
 | 6 日志误报 | `GET /quotation?orderId=abc` | 500 + **常量** ERROR 签名 | **误报**：调用方问题被记成应用故障 |
@@ -213,10 +213,7 @@ POST {{baseUrl}}/test/scenario/concurrent-burst?threads=50&rounds=50
 |---|---|---|
 | 1 磁盘写满 | `POST {{baseUrl}}/test/leak?count=200&sizeMb=1`；或开 `QUOTATION_TEMP_LEAK=true` 后反复 `GET /quotation` | `GET /quotation` → 500 `No space left on device`；Prometheus `data_disk_free_bytes` 掉底 |
 | 2 结账挂起 | `POST {{baseUrl}}/checkout?orderId=ORD001`（需 warranty 侧已注入 `WARRANTY_MISSING_FIN=true`） | 请求一直不返回；Kibana 按 traceId 关联到 warranty-service 的异常日志 |
-| 3 模板缺失（**已修复**） | `GET {{baseUrl}}/quotation/exception` | 500 + `QuotationService` 抛出的受控 `QuotationException`（`报价单模板缺失`，ERROR 日志带 orderId/traceId）；**不再是 NPE 堆栈** |
-
-> ⚠️ 场景3 的 500 与修复前**一模一样**（修复不改状态码），鉴别只能靠日志：
-> NPE 堆栈 ⇒ 判空被回滚了；带 orderId 的「报价单模板缺失」ERROR ⇒ 修复生效。
+| 3 未判空 NPE | `GET {{baseUrl}}/quotation/exception` | 500 + `QuotationService.quotationSummary` 的 NPE 堆栈 |
 
 > 场景1、2 的注入/恢复脚本在平台侧 `agentflow-testbed/fault-inject/`（`scenario1.sh` 等），
 > 细节见那份 README。
