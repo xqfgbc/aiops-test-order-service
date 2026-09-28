@@ -180,14 +180,15 @@
       "response": []
     },
     {
-      "name": "场景3 未判空 NPE（单发）",
+      "name": "场景3 模板缺失（单发，已修复）",
       "event": [
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('500 + NPE 堆栈', () => pm.response.to.have.status(500));"
+              "pm.test('500 —— 与修复前同为 500，不能靠状态码判修复', () => pm.response.to.have.status(500));",
+              "pm.test('判修复看日志：应有带 orderId 的「报价单模板缺失」ERROR，不再有 NPE 堆栈', () => true);"
             ]
           }
         }
@@ -196,7 +197,7 @@
         "method": "GET",
         "header": [],
         "url": "{{baseUrl}}/quotation/exception?orderId={{orderId}}",
-        "description": "场景3：模板加载失败返回 null，未判空直接 trim() → NullPointerException。\n\n期望：HTTP 500，Kibana 里能看到 QuotationService.quotationSummary 的 NPE 堆栈（带 traceId）。"
+        "description": "场景3（已修复）：模板加载失败返回 null。修复后服务在 trim() 前判空，抛**受控** QuotationException（消息「报价单模板缺失」，由 GlobalExceptionHandler 记 ERROR）—— 不再让 null 流到 trim() 触发 NullPointerException。\n\n期望：HTTP 500（状态码与修复前完全一致，判修复只能看日志）。\nKibana 里应看到带 orderId/traceId 的「报价单模板缺失」ERROR；**不再有** QuotationService.quotationSummary 的 NPE 堆栈。"
       },
       "response": []
     },
