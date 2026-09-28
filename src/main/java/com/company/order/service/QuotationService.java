@@ -30,10 +30,6 @@ import java.util.UUID;
  *
  * <p><b>并发型场景（4/5）单发请求永远不触发</b>，需要并发：见 {@code docs/POSTMAN_SCENARIOS.md}
  * 与 {@code POST /test/scenario/concurrent-burst}。场景5 一旦触发，服务整体卡死，恢复要重启进程。
- *
- * <p><b>场景3（{@link #quotationSummary} 的空指针）已修复</b>：模板缺失时不再抛
- * {@code NullPointerException}，改为受控的 {@link QuotationException}。注意 HTTP 状态码不变
- * （两者都被 {@code GlobalExceptionHandler} 映射为 500），修复消除的是「空指针堆栈、无法定位」。
  */
 @Service
 public class QuotationService {
@@ -279,16 +275,7 @@ public class QuotationService {
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
         log.info("渲染报价单摘要 orderId={}", orderId);
-        // ✅ 场景3 修复：loadTemplate 查不到模板时返回 null，**必须先判空再使用**。
-        //   修复前这里是 `return template.trim()` —— NPE 直接穿透到 GlobalExceptionHandler，
-        //   日志里只有一条无上下文的空指针堆栈（无法定位是哪个订单/哪一步）。
-        //   现在转为受控业务异常并显式记录「模板缺失」+ orderId。
-        //   ⚠️ HTTP 状态码不变：GlobalExceptionHandler 对 QuotationException 同样映射 500，
-        //   本次修复消除的是「NullPointerException 堆栈 / 不可定位」，不是状态码。
-        if (template == null) {
-            log.error("报价单模板缺失 orderId={}", orderId);
-            throw new QuotationException("报价单模板缺失", null);
-        }
+        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
         return template.trim();
     }
 
