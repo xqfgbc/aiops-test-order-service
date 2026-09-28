@@ -33,6 +33,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>场景4（SimpleDateFormat 竞态）**本质是概率性的**：低并发下不复现，
  * 单测不跑竞态，只用反射钉住"共享 static 实例"这个注入事实。
+ *
+ * <p>例外：场景3 的 {@code quotationSummary} 空指针**已修复**，
+ * 见 {@code quotationSummary_throwsQuotationExceptionInsteadOfNullPointer} —— 它是**回归测试**，
+ * 钉住修复后的期望行为（抛受控异常而非 NPE），判空逻辑若被再次删掉/回滚该用例立刻失败。
  */
 class QuotationServiceTest {
 
@@ -158,6 +162,31 @@ class QuotationServiceTest {
                     .filter(e -> e.getFormattedMessage().startsWith("报价单明细渲染"))
                     .count();
             assertThat(perItem).isEqualTo(TEST_LINE_ITEMS);
+        } finally {
+            detach(appender);
+        }
+    }
+
+    @Test
+    void quotationSummary_throwsQuotationExceptionInsteadOfNullPointer(@TempDir Path tmp) {
+        // ✅ 场景3 回归测试：loadTemplate 恒返回 null，修复后必须抛**受控**的 QuotationException，
+        //   而不是 NullPointerException（修复前 `template.trim()` 必现 NPE → 日志只有空指针堆栈、无法定位）。
+        //   ⚠️ 这里刻意断言 isNotInstanceOf(NullPointerException.class)：
+        //   若判空逻辑被再次删掉/回滚（历史上该修复曾被 revert 过一次），本用例立刻失败。
+        //   ⚠️ HTTP 状态码不参与断言：NPE 与 QuotationException 都被 GlobalExceptionHandler
+        //   映射为 500，状态码无法鉴别该缺陷，只能看异常类型与 ERROR 日志。
+        ListAppender<ILoggingEvent> appender = attach();
+        try {
+            assertThatThrownBy(() -> service(tmp, false).quotationSummary("ORD-1"))
+                    .as("模板缺失必须是受控业务异常，不能是 NPE")
+                    .isInstanceOf(QuotationException.class)
+                    .isNotInstanceOf(NullPointerException.class)
+                    .hasMessageContaining("报价单模板缺失");
+
+            assertThat(appender.list)
+                    .filteredOn(e -> e.getLevel() == Level.ERROR)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .containsExactly("报价单模板缺失 orderId=ORD-1");
         } finally {
             detach(appender);
         }
