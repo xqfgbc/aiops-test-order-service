@@ -334,14 +334,7 @@ public class QuotationService {
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
         log.info("渲染报价单摘要 orderId={}", orderId);
-        // 修复（原场景3 bug 注入点）：模板加载失败会返回 null，若直接 template.trim() 将抛
-        // NullPointerException —— 那是运维/开发都无法从业务语义读懂的裸 NPE，且堆栈顶层恰好
-        // 落在本方法，掩盖了「模板加载失败」这一真实根因。这里改为判空，抛受控业务异常
-        // QuotationException（仍由 GlobalExceptionHandler 统一映射，状态码不变），
-        // 使日志/链路上呈现的是可读的业务语义，而不是 NPE 栈帧。
-        if (template == null) {
-            throw new QuotationException("报价单模板加载失败: orderId=" + orderId, null);
-        }
+        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
         return template.trim();
     }
 

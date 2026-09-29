@@ -215,23 +215,4 @@ class QuotationServiceTest {
         assertThat(expired).doesNotExist();
         assertThat(leak).as("leak_*.bin 是场景1 的填盘证据，清理任务不许动").exists();
     }
-
-    /**
-     * 场景3 回归用例：模板加载失败（{@code loadTemplate} 返回 null）时，
-     * {@code quotationSummary} 必须抛出**受控业务异常** {@link QuotationException}，
-     * 而不是裸的 {@link NullPointerException}。
-     *
-     * <p>该用例在引入缺陷（{@code template.trim()} 未判空）时失败、在修复后通过，
-     * 形成回归锁：防止后续 revert / 重构再次把判空逻辑删掉。
-     *
-     * <p>刻意断言 {@code isNotInstanceOf(NullPointerException.class)}：即便将来
-     * {@link QuotationException} 的继承关系变化，也不允许退化成 NPE。
-     */
-    @Test
-    void quotationSummary_throwsControlledExceptionWhenTemplateMissing(@TempDir Path tmp) {
-        assertThatThrownBy(() -> service(tmp, false).quotationSummary("ORD-2001"))
-                .isInstanceOf(QuotationException.class)
-                .isNotInstanceOf(NullPointerException.class)
-                .hasMessageContaining("报价单模板加载失败");
-    }
 }
