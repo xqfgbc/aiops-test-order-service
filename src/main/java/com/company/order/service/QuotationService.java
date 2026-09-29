@@ -21,7 +21,8 @@ import java.util.UUID;
  *
  * <h3>本类里的注入点</h3>
  * <ul>
- *   <li><b>场景1</b> {@link #generateQuotation}：{@code quotation.temp-leak=true} 时 finally 不清理临时文件 → 磁盘写满。</li>
+ *   <li><b>场景1</b> {@link #generateQuotation}：{@code quotation.temp-leak} 曾被用于跳过临时文件清理 → 磁盘写满。
+ *       现已修复：临时文件的清理不再受任何开关影响（见 {@link #generateQuotation} 的 finally）。</li>
  *   <li><b>场景4</b> {@link #formatDeliveryDate}：{@code static} 共享的 {@link SimpleDateFormat}，并发下算错日期/抛异常。</li>
  *   <li><b>场景5</b> {@link #generateQuotation} 与 {@link #cleanExpiredFiles}：两把锁的获取顺序相反（ABBA）→ 死锁。</li>
  *   <li><b>场景6</b> {@link #generateQuotation}：参数校验失败（调用方问题）却记 ERROR → 误报洪水。</li>
@@ -86,6 +87,12 @@ public class QuotationService {
     /** 模板仓库（真实实现从配置中心/模板库加载；这里用常量代替）。 */
     private static final String ROW_TEMPLATE_DEFAULT = "  - {ITEM} | order={ORDER}";
 
+    /**
+     * 写入前必须为磁盘保留的最小可用空间（含其它组件/清理任务的余量）。
+     * 低于它就不再写临时文件，直接返回受控业务错误，避免把卷彻底写满。
+     */
+    private static final long MIN_FREE_BYTES = 16L * 1024 * 1024;
+
     // ⚠️ 场景5 bug 注入点：两把锁，生成路径与清理路径的获取顺序相反 → ABBA 死锁。
     //   注意必须是**实例**字段（不是 static）：单测里每个 service 实例互不影响。
     /** 模板缓存锁（保护 {@link #rowTemplate}）。 */
@@ -99,9 +106,23 @@ public class QuotationService {
     @Value("${quotation.temp-dir:/data/tmp}")
     private String tempDir;
 
-    // ⚠️ 场景1 bug 开关：QUOTATION_TEMP_LEAK=true 时泄漏临时文件（不清理）→ 磁盘写满
+    /**
+     * ⚠️ 场景1 的历史注入开关：{@code QUOTATION_TEMP_LEAK=true} 时终于不再起作用 ——
+     * 临时文件的清理已在 finally 中无条件执行，磁盘不再被单请求反复写满。
+     *
+     * <p>字段保留仅为**向后兼容**：老的 ConfigMap 里可能仍写着这个键，需能正常绑定而不至于启动失败；
+     * 它已不参与任何分支。清理逻辑不再取决于任何外部开关。
+     */
+    @Deprecated
     @Value("${quotation.temp-leak:false}")
     private boolean tempLeak;
+
+    /**
+     * 单次请求生成内容（报价单正文）的字节上限：防止单请求凭一个超大 lineItems
+     * 就把临时卷写入耗尽。超限直接返回受控业务错误，而不是真的去写盘。
+     */
+    @Value("${quotation.max-content-bytes:10485760}")
+    private long maxContentBytes = 10L * 1024 * 1024;
 
     /**
      * 场景7 的量级旋钮：每次请求渲染多少行明细 = 打多少条 INFO 日志。
@@ -125,8 +146,10 @@ public class QuotationService {
         }
 
         File dir = new File(tempDir);
-        if (!dir.exists()) {
-            dir.mkdirs();
+        if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
+            // 目录都建不出来（权限/磁盘满），直接给受控业务错误，而不是让后续 I/O 抛裸 IOException
+            log.error("报价单临时目录不可用 dir={}", tempDir);
+            throw new QuotationException("报价单临时目录不可用: " + tempDir, null);
         }
 
         // ⚠️ 场景4 + 场景7：**必须在锁外**。放进 templateLock 里会被串行化（并发度恒为 1），
@@ -138,24 +161,60 @@ public class QuotationService {
             byte[] content;
             synchronized (templateLock) {                        // 场景5-A：生成路径先拿**模板锁**
                 content = composeQuotation(orderId, rows);
+
+                // 修复（磁盘写满）：写入前先做两道资源闸门，避免把卷彻底写满。
+                if (maxContentBytes > 0 && content.length > maxContentBytes) {
+                    log.error("报价单内容超过单请求上限 size={} limit={}", content.length, maxContentBytes);
+                    throw new QuotationException("报价单内容过大: " + content.length + " > " + maxContentBytes, null);
+                }
+                long usable = dir.getUsableSpace();
+                if (usable > 0 && usable < MIN_FREE_BYTES + content.length) {
+                    log.error("报价单写入失败: 磁盘可用空间不足 usable={} need={}", usable, content.length);
+                    throw new QuotationException("报价单写入失败: 磁盘可用空间不足", null);
+                }
+
                 synchronized (fileLock) {                        // 场景5-A：再拿**文件锁** ← ABBA 的一半
                     tmp = File.createTempFile("quotation_" + orderId + "_", ".pdf", dir);
+                    // try-with-resources：文件句柄一定会关闭，不会因异常泄漏 fd
                     try (FileOutputStream out = new FileOutputStream(tmp)) {
                         out.write(content);
+                        out.flush();
                     }
                 }
             }
             log.info("报价单生成成功 orderId={} file={}", orderId, tmp.getName());
             return content;
         } catch (IOException e) {
+            // 受控处理：把底层 IOException（含 No space left on device）收敛成明确的业务错误，
+            // 由 GlobalExceptionHandler 统一映射，日志里能看到可读的根因而不是裸栈。
+            if (isDiskFull(e)) {
+                log.error("报价单写入失败: 磁盘空间不足 dir={}", tempDir, e);
+                throw new QuotationException("报价单写入失败: 磁盘空间不足", e);
+            }
             log.error("生成报价单失败: {}", e.toString(), e);
             throw new QuotationException("生成报价单失败", e);
         } finally {
-            // ⚠️ 场景1 bug 注入点：tempLeak=true 时不删除临时文件，模拟「finally 未清理」
-            if (tmp != null && tmp.exists() && !tempLeak) {
-                tmp.delete();
+            // 修复（quotation.temp-leak 缺陷）：临时文件的生命周期**无条件**在 finally 中收口。
+            //   原实现 `if (tmp != null && tmp.exists() && !tempLeak) tmp.delete();` 让
+            //   QUOTATION_TEMP_LEAK=true 时跳过删除，反复调用即把 /data/tmp 写满 →
+            //   IOException: No space left on device → 500。清理不该由任何可注入开关决定。
+            //   删除失败只记 WARN（不掩盖业务结果），便于磁盘侧排查。
+            if (tmp != null) {
+                if (!tmp.delete() && tmp.exists()) {
+                    log.warn("报价单临时文件删除失败 file={}", tmp.getName());
+                }
             }
         }
+    }
+
+    /** 判断 IOException 是否为「磁盘写满」类错误（ENOSPC），用于给出更精确的业务错误与日志。 */
+    private static boolean isDiskFull(IOException e) {
+        String msg = e.getMessage();
+        if (msg == null) {
+            return false;
+        }
+        String lower = msg.toLowerCase();
+        return lower.contains("no space left") || lower.contains("enospc");
     }
 
     /**
