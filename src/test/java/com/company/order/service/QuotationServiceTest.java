@@ -27,12 +27,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>不起 Spring 上下文：{@code @Value} 字段直接注，测的是**类自己的行为**，毫秒级完成。
  * 要测装配/HTTP 层应另开 {@code @SpringBootTest}。
  *
- * <p><b>这些是"特征化测试"</b>（characterization）：它们**钉住注入 bug 的现状**，
- * 而不是断言它「正确」—— 例如断言「没清理临时文件」「打了 10 条日志」「锁会互相卡死」。
- * 要验证修复，应当反过来断言期望行为（清理干净、日志收敛到 1 条、不再死锁）。
- *
- * <p>场景4（SimpleDateFormat 竞态）**本质是概率性的**：低并发下不复现，
- * 单测不跑竞态，只用反射钉住"共享 static 实例"这个注入事实。
+ * <p>并发型场景（4/5）单发请求永不触发，用 {@code POST /test/scenario/concurrent-burst}。
  */
 class QuotationServiceTest {
 
@@ -97,13 +92,13 @@ class QuotationServiceTest {
     }
 
     @Test
-    void generateQuotation_leavesTempFileWhenLeakSwitchIsOn(@TempDir Path tmp) throws IOException {
-        // 场景1 的 bug 开关（QUOTATION_TEMP_LEAK=true）：finally 不清理 → 反复调用写满磁盘。
-        // 这是**特征化测试**：钉住开关的现状，而不是断言它「正确」——
-        // 要验证修复，应当反过来断言 leak 开启时也不留文件。
+    void generateQuotation_cleansUpTempFileEvenWhenLeakSwitchIsOn(@TempDir Path tmp) throws IOException {
+        // 场景1 回归锁（原为特征化测试，断言"leak 开关打开时不清理"这一注入事实）。
+        // 修复后契约反转：临时文件的生命周期**无条件**在 finally 中收口，
+        // 历史开关 quotation.temp-leak 不再影响清理 —— 否则反复调用会把磁盘写满。
         service(tmp, true).generateQuotation("ORD-1003");
 
-        assertThat(countOf(tmp, "quotation_")).isEqualTo(1);
+        assertThat(countOf(tmp, "quotation_")).isZero();
     }
 
     @Test
