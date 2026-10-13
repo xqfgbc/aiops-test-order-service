@@ -1,6 +1,5 @@
 package com.company.order.config;
 
-import com.company.order.service.QuotationTemplateMissingException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -43,26 +42,6 @@ import java.io.IOException;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
-
-    /**
-     * 报价单模板缺失：**受控的业务失败**，不是未捕获的应用崩溃。
-     *
-     * <p>修复（场景3）：原来模板缺失会以 {@code NullPointerException} 落到下面那个兜底分支，
-     * 日志里只有一段指向 {@code template.trim()} 的 NPE 栈，客户端拿不到任何语义。
-     * 现在由 {@link QuotationTemplateMissingException} 显式表达，这里记一条**带业务错误码与
-     * orderId** 的 ERROR（不再有 NPE 栈帧），排障时一眼能看出是哪张单、因何失败。
-     *
-     * <p>状态码保持 500 不变（与改动前一致，避免影响既有依赖状态码的探针）；可区分性体现在
-     * 业务错误码 {@link QuotationTemplateMissingException#CODE} 与日志内容上。
-     */
-    @ExceptionHandler(QuotationTemplateMissingException.class)
-    public void handleQuotationTemplateMissing(QuotationTemplateMissingException e,
-                                               HttpServletRequest request,
-                                               HttpServletResponse response) throws IOException {
-        log.error("报价单模板缺失 code={} orderId={} path={}",
-                e.getCode(), e.getOrderId(), request.getRequestURI());
-        response.sendError(HttpStatus.INTERNAL_SERVER_ERROR.value());
-    }
 
     @ExceptionHandler(Exception.class)
     public void handle(Exception e, HttpServletRequest request, HttpServletResponse response) throws IOException {

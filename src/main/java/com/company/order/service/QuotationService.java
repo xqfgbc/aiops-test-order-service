@@ -23,8 +23,6 @@ import java.util.UUID;
  * <ul>
  *   <li><b>场景1</b> {@link #generateQuotation}：{@code quotation.temp-leak} 曾被用于跳过临时文件清理 → 磁盘写满。
  *       现已修复：临时文件的清理不再受任何开关影响（见 {@link #generateQuotation} 的 finally）。</li>
- *   <li><b>场景3</b> {@link #quotationSummary}：模板加载失败返回 null，未判空 → {@code NullPointerException}。
- *       现已修复：null 不再外泄，模板缺失一律抛 {@link QuotationTemplateMissingException}（见 {@link #loadTemplate}）。</li>
  *   <li><b>场景4</b> {@link #formatDeliveryDate}：{@code static} 共享的 {@link SimpleDateFormat}，并发下算错日期/抛异常。</li>
  *   <li><b>场景5</b> {@link #generateQuotation} 与 {@link #cleanExpiredFiles}：两把锁的获取顺序相反（ABBA）→ 死锁。</li>
  *   <li><b>场景6</b> {@link #generateQuotation}：参数校验失败（调用方问题）却记 ERROR → 误报洪水。</li>
@@ -332,45 +330,17 @@ public class QuotationService {
         return String.format("SKU-%05d", i);
     }
 
-    /**
-     * 报价单摘要。
-     *
-     * <p><b>修复（场景3）</b>：原实现拿到 {@code loadTemplate} 的返回值后**未判空**直接
-     * {@code template.trim()} —— 模板缺失时抛 {@code NullPointerException}。现在：
-     * (1) {@link #loadTemplate} 保证不返回 null（缺失即抛 {@link QuotationTemplateMissingException}）；
-     * (2) 本方法仍保留一道判空闸门，作为**最后防线**，防止后续再引入返回 null 的实现。
-     */
+    /** 报价单摘要（场景3 被测）。 */
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
-        if (template == null) {
-            // 兜底保护：既然 loadTemplate 已承诺不返回 null，走到这里说明实现被改回去了。
-            log.error("报价单模板缺失 code={} orderId={}",
-                    QuotationTemplateMissingException.CODE, orderId);
-            throw new QuotationTemplateMissingException(orderId, null);
-        }
         log.info("渲染报价单摘要 orderId={}", orderId);
+        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
         return template.trim();
     }
 
-    /**
-     * 从模板仓库/配置中心加载明细行模板。
-     *
-     * <p><b>修复（场景3）</b>：原实现查不到模板时返回 {@code null}，把"缺失"这个事实丢给调用方，
-     * 调用方一旦忘记判空就是 NPE。现在加载失败一律记一条含 orderId 的 ERROR 并抛
-     * {@link QuotationTemplateMissingException}，**保证不向调用方返回 null**。
-     */
+    /** 模拟模板仓库/配置中心查询：查不到时返回 null（不做兜底） */
     private String loadTemplate(String orderId) {
-        String template = fetchTemplateFromRepo(orderId);
-        if (template == null) {
-            log.error("报价单模板加载失败 code={} orderId={}",
-                    QuotationTemplateMissingException.CODE, orderId);
-            throw new QuotationTemplateMissingException(orderId, null);
-        }
-        return template;
-    }
-
-    /** 模板仓库/配置中心查询桩（真实实现是一次远程调用）；查不到时返回 null，不做静默兜底。 */
-    private String fetchTemplateFromRepo(String orderId) {
+        log.warn("报价单模板加载失败，返回 null orderId={}", orderId);
         return null;
     }
 
