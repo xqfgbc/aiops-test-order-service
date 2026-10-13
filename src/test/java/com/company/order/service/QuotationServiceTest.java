@@ -171,6 +171,30 @@ class QuotationServiceTest {
     }
 
     @Test
+    void quotationSummary_throwsControlledExceptionInsteadOfNpeWhenTemplateMissing(@TempDir Path tmp) {
+        // 场景3 回归锁：模板缺失时不再对 null 调 template.trim() 抛 NullPointerException，
+        // 而是抛受控业务异常 QuotationTemplateMissingException（携带 orderId），
+        // 并由 QuotationController 映射成可读业务错误。
+        ListAppender<ILoggingEvent> appender = attach();
+        try {
+            assertThatThrownBy(() -> service(tmp, false).quotationSummary("ORD-2001"))
+                    .isInstanceOf(QuotationTemplateMissingException.class)
+                    .hasMessageContaining("ORD-2001")
+                    .isNotInstanceOf(NullPointerException.class)
+                    .satisfies(e -> assertThat(((QuotationTemplateMissingException) e).getOrderId())
+                            .isEqualTo("ORD-2001"));
+
+            // 受控异常需自带 orderId 便于排障：日志里应能看到该单号
+            assertThat(appender.list)
+                    .filteredOn(e -> e.getLevel() == Level.ERROR)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(m -> assertThat(m).contains("ORD-2001"));
+        } finally {
+            detach(appender);
+        }
+    }
+
+    @Test
     void generateQuotation_deadlocksWithCleanupBecauseLockOrderInverts(@TempDir Path tmp) throws Exception {
         // 场景5 特征化：清理路径 fileLock→templateLock，生成路径 templateLock→fileLock，顺序相反。
         //
