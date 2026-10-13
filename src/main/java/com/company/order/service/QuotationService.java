@@ -1,5 +1,6 @@
 package com.company.order.service;
 
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,7 +23,10 @@ import java.util.UUID;
  * <h3>本类里的注入点</h3>
  * <ul>
  *   <li><b>场景1</b> {@link #generateQuotation}：{@code quotation.temp-leak} 曾被用于跳过临时文件清理 → 磁盘写满。
- *       现已修复：临时文件的清理不再受任何开关影响（见 {@link #generateQuotation} 的 finally）。</li>
+ *       现已修复：临时文件的清理不再受任何开关影响（见 {@link #generateQuotation} 的 finally）；
+ *       且 {@code /data} 临时卷里的**任何**过期文件（含历史遗留的 {@code leak_*.bin}、异常退出遗留的
+ *       {@code quotation_*}）都会被 TTL 回收（{@link #reclaimStaleFiles}、
+ *       {@link #cleanExpiredFiles}、启动自愈 {@link #reapOnStartup}），不再无限累积。</li>
  *   <li><b>场景4</b> {@link #formatDeliveryDate}：{@code static} 共享的 {@link SimpleDateFormat}，并发下算错日期/抛异常。</li>
  *   <li><b>场景5</b> {@link #generateQuotation} 与 {@link #cleanExpiredFiles}：两把锁的获取顺序相反（ABBA）→ 死锁。</li>
  *   <li><b>场景6</b> {@link #generateQuotation}：参数校验失败（调用方问题）却记 ERROR → 误报洪水。</li>
@@ -84,6 +88,16 @@ public class QuotationService {
     /** 只清理自己的文件：超过这个年龄的 {@code quotation_*} 才算过期。 */
     private static final long EXPIRED_AGE_MS = 10 * 60 * 1000L;
 
+    /**
+     * 单次回收扫描的文件数上限：目录被写爆时 {@code listFiles()} 可能返回上万条，
+     * 限个上限避免清理线程长时间占着 fileLock（也避免把死锁窗口无谓拉长）。
+     * 多轮清理自然会把剩下的收完。
+     */
+    private static final int MAX_REAP_SCAN = 5000;
+
+    /** 临时卷可用空间低于总容量的这个比例时打 WARN（内存型 EmptyDir 上就是"内存快被吃光"的前兆）。 */
+    private static final double TEMP_VOLUME_LOW_FREE_RATIO = 0.2;
+
     /** 模板仓库（真实实现从配置中心/模板库加载；这里用常量代替）。 */
     private static final String ROW_TEMPLATE_DEFAULT = "  - {ITEM} | order={ORDER}";
 
@@ -128,10 +142,38 @@ public class QuotationService {
      * 场景7 的量级旋钮：每次请求渲染多少行明细 = 打多少条 INFO 日志。
      *
      * <p>500 行 = 单请求约 500 条 INFO（日志量突增）;同时也是场景4 竞态的**窗口来源**
-     * （每行一次 parse+format，约几百微秒的在临界区时间）。调小它两个场景都会变弱。
+     * （每行一次 parse+format，约几百微秒的在临界区时间）。调小它两个场景都会弱化。
      */
     @Value("${quotation.line-items:500}")
     private int lineItems;
+
+    /**
+     * 启动自愈：临时卷（尤其 {@code medium: Memory} 的 EmptyDir，容量通常只有几百 MiB）
+     * 在**容器重启**时并不会被清空 —— 上一轮进程遗留的临时文件会一直占着这块内存卷，
+     * 于是「写满 → 重启容器」永远解不开，只有重建 Pod 才释放。
+     *
+     * <p>所以进程启动时先按 TTL 回收一轮 {@code tempDir} 下**所有**过期文件
+     * （{@code quotation_*}、历史遗留的 {@code leak_*.bin}、异常退出留下的孤儿文件），
+     * 把「重启」重新变成一种有效的恢复手段；同时打 WARN 留下可观测的痕迹。
+     */
+    @PostConstruct
+    void reapOnStartup() {
+        if (tempDir == null) {
+            return;
+        }
+        try {
+            synchronized (fileLock) {
+                int reaped = reclaimStaleFiles();
+                if (reaped > 0) {
+                    log.warn("启动自愈：回收过期临时文件 {} 个 dir={}", reaped, tempDir);
+                }
+                warnIfTempVolumeScarce();
+            }
+        } catch (Exception e) {
+            // 自愈失败绝不能影响启动：记 WARN 即可（同 cleanExpiredFiles 不外抛的理由）
+            log.warn("启动自愈失败: {}", e.toString(), e);
+        }
+    }
 
     public byte[] generateQuotation(String orderId) {
         // ⚠️ 场景6 bug 注入点：「订单号格式非法」是**调用方的错**（本该 400、本不该记 ERROR），
@@ -188,6 +230,16 @@ public class QuotationService {
             // 受控处理：把底层 IOException（含 No space left on device）收敛成明确的业务错误，
             // 由 GlobalExceptionHandler 统一映射，日志里能看到可读的根因而不是裸栈。
             if (isDiskFull(e)) {
+                // 容量告急时**立刻**自愈一次，不干等下一个清理周期：内存型 EmptyDir 一旦写满，
+                // 不主动回收的话会一直 100% 直到重建 Pod（CPU/内存被写盘与 GC 一起拖满）。
+                // 此处已退出上面两个同步块，按 fileLock → templateLock 的顺序取锁，不构成 ABBA。
+                int reaped;
+                synchronized (fileLock) {
+                    reaped = reclaimStaleFiles();
+                }
+                if (reaped > 0) {
+                    log.warn("磁盘写满后回收过期临时文件 {} 个 dir={}", reaped, tempDir);
+                }
                 log.error("报价单写入失败: 磁盘空间不足 dir={}", tempDir, e);
                 throw new QuotationException("报价单写入失败: 磁盘空间不足", e);
             }
@@ -278,6 +330,10 @@ public class QuotationService {
         try {
             synchronized (fileLock) {                            // 场景5-B：清理路径先拿**文件锁**
                 int deleted = scanAndDeleteExpired();
+                // 场景1 复发防护：回收**不限前缀** —— 临时卷上任何过期文件（含历史遗留的 leak_*.bin、
+                //   异常退出/容器重启留下的孤儿文件）都不允许在 /data 里无限累积。
+                deleted += reclaimStaleFiles();
+                warnIfTempVolumeScarce();
                 // ⚠️ 注入用：把 fileLock 的持有时长拉到几毫秒，见 cleanupScanHoldMs 的说明
                 Thread.sleep(Math.max(0, cleanupScanHoldMs));
                 synchronized (templateLock) {                    // 场景5-B：再拿**模板锁** ← 顺序与生成路径相反
@@ -300,7 +356,9 @@ public class QuotationService {
      * 扫描并删除过期的 {@code quotation_*} 临时文件。
      *
      * <p>只匹配 {@code quotation_} 前缀：{@code leak_*.bin}（场景1 的填盘证据）不归它管，
-     * 否则清理任务会把场景1 的证据删掉，两个场景互相拆台。
+     * 否则清理任务会把场景1 的证据删掉，两个场景互相拆台。**但"不删证据"不等于"不设 TTL"** ——
+     * 填盘残留/孤儿文件由 {@link #reclaimStaleFiles()} 按年龄回收，两者的职责分开：
+     * 本方法管"这一类文件"的即时回收，{@code reclaimStaleFiles} 管"任何文件都不许永久占着卷"。
      */
     private int scanAndDeleteExpired() {
         File dir = new File(tempDir);
@@ -319,6 +377,58 @@ public class QuotationService {
             }
         }
         return deleted;
+    }
+
+    /**
+     * 按 TTL 回收 {@code tempDir} 下**任何**过期文件（不限前缀）。
+     *
+     * <p>为什么需要它：{@code /data} 挂的是几百 MiB 的卷（本场景里还是 {@code medium: Memory} 的
+     * EmptyDir），一旦被写满，业务侧每一单报价单都会抛 {@code No space left on device}，
+     * 而"重启容器"并不会清空 EmptyDir —— 只靠按前缀清理，填盘残留会永远留在卷上，
+     * 故障不可自愈。这里给所有文件一个统一的年龄上限：超过 {@link #EXPIRED_AGE_MS} 未再被触碰即回收。
+     *
+     * <p>只删"过期"的，不碰刚刚写入的文件 —— 也保证并发场景下正在写的临时文件不会被误删。
+     * 删除失败静默计数（不抛异常，清理路径不许外抛）。
+     *
+     * @return 实际删除的文件数
+     */
+    private int reclaimStaleFiles() {
+        File dir = new File(tempDir);
+        if (tempDir == null || !dir.isDirectory()) {
+            return 0;
+        }
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return 0;
+        }
+        long deadline = System.currentTimeMillis() - EXPIRED_AGE_MS;
+        int deleted = 0;
+        int scanned = 0;
+        for (File f : files) {
+            if (scanned++ >= MAX_REAP_SCAN) {
+                break;
+            }
+            if (f.isFile() && f.lastModified() < deadline && f.delete()) {
+                deleted++;
+            }
+        }
+        return deleted;
+    }
+
+    /**
+     * 临时卷可用空间告急时打一条 WARN（带上可用/总容量），让"卷快被写满"这件事在业务日志里
+     * 也留痕，而不只是靠外部采集的 disk_percent —— 内存型 EmptyDir 上这同时就是内存告警的前兆。
+     */
+    private void warnIfTempVolumeScarce() {
+        File dir = new File(tempDir);
+        if (!dir.isDirectory()) {
+            return;
+        }
+        long total = dir.getTotalSpace();
+        long usable = dir.getUsableSpace();
+        if (total > 0 && usable >= 0 && usable < (long) (total * TEMP_VOLUME_LOW_FREE_RATIO)) {
+            log.warn("临时卷可用空间不足 dir={} usable={} total={}", tempDir, usable, total);
+        }
     }
 
     /** 从模板仓库重新加载明细行模板（真实实现是一次远程/配置中心调用，这里用常量代替）。 */
