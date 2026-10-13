@@ -84,6 +84,15 @@ class QuotationServiceTest {
     }
 
     @Test
+    void generateQuotation_acceptsValidOrderIdWithoutBreakingNormalFlow(@TempDir Path tmp) {
+        // 回归锁：防止校验改动误伤正常下单流程。平台侧 load/验证脚本用的是 ORD001 这类单号，
+        // 必须仍然走正常路径返回报价单正文（而不是被收严的校验打成 4xx）。
+        byte[] pdf = service(tmp, false).generateQuotation("ORD001");
+
+        assertThat(new String(pdf, StandardCharsets.UTF_8)).contains("ORD001");
+    }
+
+    @Test
     void generateQuotation_cleansUpItsTempFileByDefault(@TempDir Path tmp) throws IOException {
         service(tmp, false).generateQuotation("ORD-1002");
 
@@ -122,23 +131,44 @@ class QuotationServiceTest {
     }
 
     @Test
-    void generateQuotation_rejectsOrderIdWithoutOrdPrefixButLogsItAsError(@TempDir Path tmp) {
-        // 场景6 特征化：这是**误报**演示 —— 调用方的错（本该 400、本不该记 ERROR），
-        // 这里记成 ERROR 并抛 IllegalArgumentException 走 500。
-        // 断言"消息里没有任何插值"是刻意的：带变量会让每条签名都不同，
-        // 基于 signature_aggregate 的日志检测就聚合不出 LogAnomaly（同 LogGenerator 的注释）。
+    void generateQuotation_rejectsOrderIdWithoutOrdPrefixAsClientParameterError(@TempDir Path tmp) {
+        // 场景6 回归锁（原为特征化测试，断言"非法订单号记 ERROR + 抛 IllegalArgumentException 走 500"）。
+        // 修复后契约反转：调用方的脏参数是**客户端错误** —— 抛受控的 InvalidOrderIdException（带 orderId），
+        // 由 GlobalExceptionHandler 映射为 HTTP 400 + 结构化错误体；日志降为 WARN，
+        // 不再出现 ERROR/unhandled，也就不会再被日志监控当成应用故障、不再计入 5xx。
         ListAppender<ILoggingEvent> appender = attach();
         try {
             assertThatThrownBy(() -> service(tmp, false).generateQuotation("abc"))
-                    .isInstanceOf(IllegalArgumentException.class);
+                    .isInstanceOf(InvalidOrderIdException.class)
+                    .isNotInstanceOf(IllegalArgumentException.class)
+                    .satisfies(e -> assertThat(((InvalidOrderIdException) e).getOrderId()).isEqualTo("abc"));
 
+            // 关键断言：参数校验失败不再产生任何 ERROR 日志
             assertThat(appender.list)
                     .filteredOn(e -> e.getLevel() == Level.ERROR)
-                    .extracting(ILoggingEvent::getFormattedMessage)
-                    .containsExactly("报价单参数校验失败: 订单号格式非法");
+                    .as("非法订单号不再记 ERROR（否则会污染基于 ERROR 的日志监控与 5xx 指标）")
+                    .isEmpty();
         } finally {
             detach(appender);
         }
+    }
+
+    @Test
+    void generateQuotation_rejectsNullBlankAndOverlongOrderId(@TempDir Path tmp) {
+        // 场景6 边界回归：为空 / 空白 / 超长三类非法入参都必须收敛为客户端参数异常，
+        // 而不是在业务代码里抛未捕获异常（或触发 NPE）走 500。
+        QuotationService svc = service(tmp, false);
+        String overlong = "ORD" + "9".repeat(200);
+
+        assertThatThrownBy(() -> svc.generateQuotation(null))
+                .isInstanceOf(InvalidOrderIdException.class);
+        assertThatThrownBy(() -> svc.generateQuotation(""))
+                .isInstanceOf(InvalidOrderIdException.class);
+        assertThatThrownBy(() -> svc.generateQuotation("   "))
+                .isInstanceOf(InvalidOrderIdException.class);
+        assertThatThrownBy(() -> svc.generateQuotation(overlong))
+                .isInstanceOf(InvalidOrderIdException.class)
+                .satisfies(e -> assertThat(((InvalidOrderIdException) e).getOrderId()).isEqualTo(overlong));
     }
 
     @Test
