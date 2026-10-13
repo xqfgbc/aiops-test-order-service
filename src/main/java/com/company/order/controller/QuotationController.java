@@ -1,13 +1,17 @@
 package com.company.order.controller;
 
 import com.company.order.service.QuotationService;
+import com.company.order.service.QuotationTemplateMissingException;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -19,7 +23,7 @@ import java.util.Map;
  *   <tr><td>1 磁盘写满</td><td>{@code GET /quotation}（{@code QUOTATION_TEMP_LEAK=true} 时泄漏临时文件）</td>
  *       <td>500 + {@code No space left on device}</td></tr>
  *   <tr><td>3 未判空 NPE</td><td>{@code GET /quotation/exception}</td>
- *       <td>500 + {@code quotationSummary} 的 NPE 堆栈</td></tr>
+ *       <td>修复后：模板缺失时返回受控业务错误（不再 500 + NPE 堆栈）</td></tr>
  *   <tr><td>4 SDF 竞态</td><td>{@code GET /quotation} <b>并发</b></td>
  *       <td>偶发 500（NumberFormatException）或返回体里日期错乱</td></tr>
  *   <tr><td>5 ABBA 死锁</td><td>{@code GET /quotation} <b>持续并发</b> + 清理任务</td>
@@ -52,13 +56,31 @@ public class QuotationController {
     }
 
     /**
-     * 报价单摘要（场景3 被测）：service 内模板为 null，未判空 → NullPointerException。
-     * 期望表现：HTTP 500，日志中可见 QuotationService.quotationSummary 的 NPE 堆栈。
+     * 报价单摘要（场景3 被测）。
+     *
+     * <p>修复：模板缺失时 {@link QuotationService} 抛受控业务异常 {@link QuotationTemplateMissingException}，
+     * 由下面的 {@link #handleTemplateMissing} 映射成可读业务错误，客户端不再拿到 500 + NPE 栈。
      */
     @GetMapping("/quotation/exception")
     public Map<String, Object> exception(@RequestParam String orderId) {
         String summary = quotationService.quotationSummary(orderId);
         return Map.of("orderId", orderId, "summary", summary);
     }
-    
+
+    /**
+     * 场景3 的异常映射分支：模板缺失 → 明确的业务错误码与提示，而非落入 {@code GlobalExceptionHandler}
+     * 的未捕获 500 分支。
+     *
+     * <p>响应体带 {@code code} / {@code message} / {@code orderId}，便于排障与接口级断言；
+     * 使用 422（Unprocessable Entity）—— 请求本身合法，只是服务端缺少对应模板资源。
+     */
+    @ExceptionHandler(QuotationTemplateMissingException.class)
+    public ResponseEntity<Map<String, Object>> handleTemplateMissing(QuotationTemplateMissingException e) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("code", "QUOTATION_TEMPLATE_MISSING");
+        body.put("message", "报价单模板缺失，无法生成摘要");
+        body.put("orderId", e.getOrderId());
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(body);
+    }
+
 }
