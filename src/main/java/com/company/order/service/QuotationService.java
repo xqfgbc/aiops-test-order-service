@@ -27,7 +27,8 @@ import java.util.UUID;
  *       收敛为受控业务异常 {@link QuotationTemplateMissingException}（携带 orderId）。</li>
  *   <li><b>场景4</b> {@link #formatDeliveryDate}：{@code static} 共享的 {@link SimpleDateFormat}，并发下算错日期/抛异常。</li>
  *   <li><b>场景5</b> {@link #generateQuotation} 与 {@link #cleanExpiredFiles}：两把锁的获取顺序相反（ABBA）→ 死锁。</li>
- *   <li><b>场景6</b> {@link #generateQuotation}：参数校验失败（调用方问题）却记 ERROR → 误报洪水。</li>
+ *   <li><b>场景6</b> {@link #generateQuotation}：参数校验失败（调用方问题）曾记 ERROR → 误报洪水。
+ *       现已修复：改为受控客户端参数异常 {@link InvalidOrderIdException}（由全局异常处理器映射为 400 + WARN）。</li>
  *   <li><b>场景7</b> {@link #renderItems}：循环里逐行打 INFO → 日志风暴。</li>
  * </ul>
  *
@@ -95,6 +96,12 @@ public class QuotationService {
      */
     private static final long MIN_FREE_BYTES = 16L * 1024 * 1024;
 
+    /**
+     * 订单号长度上限（场景6 参数校验的一部分）：防止超长入参把日志/文件名撑爆。
+     * 正常单号（如 {@code ORD001}）远小于它，不会误伤正常流量。
+     */
+    private static final int MAX_ORDER_ID_LENGTH = 64;
+
     // ⚠️ 场景5 bug 注入点：两把锁，生成路径与清理路径的获取顺序相反 → ABBA 死锁。
     //   注意必须是**实例**字段（不是 static）：单测里每个 service 实例互不影响。
     /** 模板缓存锁（保护 {@link #rowTemplate}）。 */
@@ -136,15 +143,15 @@ public class QuotationService {
     private int lineItems;
 
     public byte[] generateQuotation(String orderId) {
-        // ⚠️ 场景6 bug 注入点：「订单号格式非法」是**调用方的错**（本该 400、本不该记 ERROR），
-        //   这里既记了 ERROR 又靠抛异常走了 500 —— 于是日志监控（signature_aggregate, min_count=5）
-        //   会把调用方的脏参数当成应用故障，开出一堆本不该开的问题单。
-        //   ⚠️ 消息必须是**常量**、不带任何插值：带 orderId 的话每条签名都不同，聚合不出 LogAnomaly，
-        //   反而一条单也开不出来（同 LogGenerator#emitTransientBurst 的注释）。
-        //   校验用 "ORD" 前缀而不是 "ORD-"：平台侧 load/验证脚本用的是 ORD001，收严会把正常流量全打成 500。
-        if (orderId == null || !orderId.startsWith("ORD")) {
-            log.error("报价单参数校验失败: 订单号格式非法");
-            throw new IllegalArgumentException("非法订单号: " + orderId);
+        // 修复（场景6 日志误报）：订单号格式非法是**调用方的错**（本该 400、本不该记 ERROR）。
+        //   原实现既记了 ERROR 又靠抛 IllegalArgumentException 走了 500 —— 于是日志监控
+        //   （signature_aggregate, min_count=5）会把调用方的脏参数当成应用故障，开出一堆本不该开的问题单。
+        //   现在统一抛受控的客户端参数异常 InvalidOrderIdException，由 GlobalExceptionHandler
+        //   映射为 HTTP 400 + 结构化错误体，并以 WARN 记录（不再有 ERROR/unhandled、不再计入 5xx 指标）。
+        //   校验仍用 "ORD" 前缀（不是 "ORD-"）：平台侧 load/验证脚本用的是 ORD001，收严会把正常流量全打成 400。
+        String invalidReason = validateOrderId(orderId);
+        if (invalidReason != null) {
+            throw new InvalidOrderIdException(orderId, invalidReason);
         }
 
         File dir = new File(tempDir);
@@ -207,6 +214,24 @@ public class QuotationService {
                 }
             }
         }
+    }
+
+    /**
+     * 校验订单号（场景6 修复后：不再在业务代码里抛未捕获异常/记 ERROR）。
+     *
+     * @return 非法原因（{@code null} 表示合法）
+     */
+    private static String validateOrderId(String orderId) {
+        if (orderId == null || orderId.isBlank()) {
+            return "订单号不能为空";
+        }
+        if (!orderId.startsWith("ORD")) {
+            return "订单号必须以 ORD 开头";
+        }
+        if (orderId.length() > MAX_ORDER_ID_LENGTH) {
+            return "订单号长度超过上限 " + MAX_ORDER_ID_LENGTH;
+        }
+        return null;
     }
 
     /** 判断 IOException 是否为「磁盘写满」类错误（ENOSPC），用于给出更精确的业务错误与日志。 */
