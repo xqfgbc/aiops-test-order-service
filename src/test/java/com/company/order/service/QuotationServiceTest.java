@@ -11,6 +11,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -22,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * QuotationService 单元测试（场景1、4、5、6、7 的被测服务）。
+ * QuotationService 单元测试（场景1、3、4、5、6、7 的被测服务）。
  *
  * <p>不起 Spring 上下文：{@code @Value} 字段直接注，测的是**类自己的行为**，毫秒级完成。
  * 要测装配/HTTP 层应另开 {@code @SpringBootTest}。
@@ -214,5 +215,37 @@ class QuotationServiceTest {
 
         assertThat(expired).doesNotExist();
         assertThat(leak).as("leak_*.bin 是场景1 的填盘证据，清理任务不许动").exists();
+    }
+
+    @Test
+    void quotationSummary_throwsControlledExceptionWithOrderIdWhenTemplateMissing(@TempDir Path tmp) {
+        // 场景3 修复回归：模板缺失**不再**抛 NullPointerException，而是受控的
+        // QuotationTemplateMissingException，异常自带 orderId，且日志含业务错误码。
+        ListAppender<ILoggingEvent> appender = attach();
+        try {
+            assertThatThrownBy(() -> service(tmp, false).quotationSummary("ORD-2001"))
+                    .isInstanceOf(QuotationTemplateMissingException.class)
+                    .hasFieldOrPropertyWithValue("orderId", "ORD-2001");
+
+            assertThat(appender.list)
+                    .filteredOn(e -> e.getLevel() == Level.ERROR)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(msg -> assertThat(msg)
+                            .contains(QuotationTemplateMissingException.CODE)
+                            .contains("ORD-2001"));
+        } finally {
+            detach(appender);
+        }
+    }
+
+    @Test
+    void loadTemplate_neverReturnsNullWhenTemplateIsMissing(@TempDir Path tmp) throws Exception {
+        // 场景3 根因回归：加载失败的分支**不得**再返回 null（null 一旦外泄就是下一次 NPE）。
+        QuotationService svc = service(tmp, false);
+        Method loadTemplate = QuotationService.class.getDeclaredMethod("loadTemplate", String.class);
+        loadTemplate.setAccessible(true);
+
+        assertThatThrownBy(() -> loadTemplate.invoke(svc, "ORD-2002"))
+                .hasCauseInstanceOf(QuotationTemplateMissingException.class);
     }
 }
