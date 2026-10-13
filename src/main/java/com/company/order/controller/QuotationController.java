@@ -18,8 +18,10 @@ import java.util.Map;
  *   <tr><th>场景</th><th>入口</th><th>症状</th></tr>
  *   <tr><td>1 磁盘写满</td><td>{@code GET /quotation}（{@code QUOTATION_TEMP_LEAK=true} 时泄漏临时文件）</td>
  *       <td>500 + {@code No space left on device}</td></tr>
- *   <tr><td>3 未判空 NPE</td><td>{@code GET /quotation/exception}</td>
- *       <td>500 + {@code quotationSummary} 的 NPE 堆栈</td></tr>
+ *   <tr><td>3 模板缺失（未判空 NPE）</td><td>{@code GET /quotation/exception}</td>
+ *       <td><b>已修复</b>：模板缺失不再落到 {@code template.trim()} 的 NPE，而是抛
+ *       {@code QuotationTemplateMissingException}，由 {@code GlobalExceptionHandler} 映射为
+ *       {@code 404} + {@code QUOTATION_TEMPLATE_MISSING}（受控业务错误，日志里不再有 NPE 堆栈）</td></tr>
  *   <tr><td>4 SDF 竞态</td><td>{@code GET /quotation} <b>并发</b></td>
  *       <td>偶发 500（NumberFormatException）或返回体里日期错乱</td></tr>
  *   <tr><td>5 ABBA 死锁</td><td>{@code GET /quotation} <b>持续并发</b> + 清理任务</td>
@@ -52,8 +54,12 @@ public class QuotationController {
     }
 
     /**
-     * 报价单摘要（场景3 被测）：service 内模板为 null，未判空 → NullPointerException。
-     * 期望表现：HTTP 500，日志中可见 QuotationService.quotationSummary 的 NPE 堆栈。
+     * 报价单摘要（场景3 被测）。
+     *
+     * <p>修复后的契约：模板缺失时 {@link QuotationService#quotationSummary} 抛出
+     * {@code QuotationTemplateMissingException}，由 {@code GlobalExceptionHandler} 映射为
+     * <b>404 + JSON（code/message/orderId）</b>；<b>不再</b>是未捕获 NPE → 500，
+     * 日志里也不会再出现 {@code Cannot invoke "String.trim()" because "template" is null}。
      */
     @GetMapping("/quotation/exception")
     public Map<String, Object> exception(@RequestParam String orderId) {
