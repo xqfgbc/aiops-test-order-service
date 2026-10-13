@@ -103,15 +103,6 @@ public class QuotationService {
     /** 报价单明细行模板（由 {@link #templateLock} 保护）。 */
     private volatile String rowTemplate = ROW_TEMPLATE_DEFAULT;
 
-    /**
-     * 报价单模板仓库里的内容（真实实现是配置中心/模板库查询，这里用字段代替）。
-     *
-     * <p>缺省为空 = <b>该订单没有可用模板</b>，即场景3 的复现前提；
-     * 止血（补回 ORD-001 的模板记录）可直接以 {@code QUOTATION_REPO_TEMPLATE} 注入。
-     */
-    @Value("${quotation.repo-template:}")
-    private String repoTemplate;
-
     @Value("${quotation.temp-dir:/data/tmp}")
     private String tempDir;
 
@@ -339,42 +330,18 @@ public class QuotationService {
         return String.format("SKU-%05d", i);
     }
 
-    /**
-     * 报价单摘要（场景3 被测）。
-     *
-     * <p>修复（未判空 NPE）：先判空再使用。模板缺失时不再对 {@code null} 调 {@code trim()}，
-     * 而是抛出携带 orderId 的受控业务异常 {@link QuotationTemplateMissingException}
-     * —— NPE 消失，日志/响应体里的语义变成「模板缺失」。
-     */
+    /** 报价单摘要（场景3 被测）。 */
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
-        if (template == null || template.isBlank()) {
-            log.error("报价单模板缺失，无法生成摘要 orderId={} code={}",
-                    orderId, QuotationTemplateMissingException.ERROR_CODE);
-            throw new QuotationTemplateMissingException(orderId);
-        }
         log.info("渲染报价单摘要 orderId={}", orderId);
+        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
         return template.trim();
     }
 
-    /**
-     * 查询模板仓库/配置中心。
-     *
-     * <p>修复（场景3）：查不到时**不再把 null 外泄给调用方** —— 记录带 orderId 的 ERROR 后
-     * 抛受控业务异常，异常自带订单号，排障时不必再去翻堆栈。
-     */
+    /** 模拟模板仓库/配置中心查询：查不到时返回 null（不做兜底） */
     private String loadTemplate(String orderId) {
-        String template = loadTemplateFromRepo(orderId);
-        if (template == null || template.isBlank()) {
-            log.error("报价单模板加载失败: 模板缺失 orderId={}", orderId);
-            throw new QuotationTemplateMissingException(orderId);
-        }
-        return template;
-    }
-
-    /** 模拟模板仓库/配置中心查询：查不到时返回 null（由 {@link #loadTemplate} 收敛为受控异常）。 */
-    private String loadTemplateFromRepo(String orderId) {
-        return repoTemplate;
+        log.warn("报价单模板加载失败，返回 null orderId={}", orderId);
+        return null;
     }
 
     /** 供 /test/leak 快速填盘 */

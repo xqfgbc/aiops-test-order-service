@@ -1,6 +1,5 @@
 package com.company.order.config;
 
-import com.company.order.service.QuotationTemplateMissingException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -43,21 +42,6 @@ import java.io.IOException;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
-
-    /**
-     * 报价单模板缺失（场景3 未判空 NPE 的受控收敛）。
-     *
-     * <p>只在既有兜底分支**之前新增一个分支**：日志从 NPE 堆栈变成带 orderId + 错误码的可读语义，
-     * HTTP 状态码仍为 500 —— 不改变上游既有的错误契约。
-     */
-    @ExceptionHandler(QuotationTemplateMissingException.class)
-    public void handleTemplateMissing(QuotationTemplateMissingException e,
-                                      HttpServletRequest request,
-                                      HttpServletResponse response) throws IOException {
-        log.error("报价单模板缺失 orderId={} code={} {} {}",
-                e.getOrderId(), e.getErrorCode(), request.getMethod(), request.getRequestURI(), e);
-        response.sendError(HttpStatus.INTERNAL_SERVER_ERROR.value());
-    }
 
     @ExceptionHandler(Exception.class)
     public void handle(Exception e, HttpServletRequest request, HttpServletResponse response) throws IOException {
