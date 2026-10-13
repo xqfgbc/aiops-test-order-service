@@ -1,19 +1,15 @@
 package com.company.order.config;
 
-import com.company.order.service.QuotationTemplateMissingException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.io.IOException;
-import java.util.LinkedHashMap;
-import java.util.Map;
 
 /**
  * 未处理异常的日志落点 —— 让 ERROR 日志带上 traceId。
@@ -41,32 +37,11 @@ import java.util.Map;
  *
  * <p>响应体不在这里拼：统一走 {@code sendError} 交回容器的 {@code /error}
  * （{@code BasicErrorController}），保证与改动前**完全一致**。
- *
- * <p>例外：可识别的受控业务异常（如 {@link QuotationTemplateMissingException}）走下面的
- * 专用分支，返回明确的错误码 + 提示（4xx），不再落成 500。
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
-
-    /**
-     * 报价单模板缺失：受控业务错误（调用方拿不到摘要，属可预期的业务状态），
-     * 映射为 404 + 明确错误码/提示，避免落入 500（以及原先的裸 NPE 堆栈）。
-     *
-     * <p>注意：这里**不**记 ERROR 级别 —— 具体失败点已在 {@code QuotationService} 记带
-     * orderId 的 ERROR，此处再记会多出一个签名、污染基于 ERROR 的日志检测。
-     */
-    @ExceptionHandler(QuotationTemplateMissingException.class)
-    public ResponseEntity<Map<String, Object>> handleQuotationTemplateMissing(
-            QuotationTemplateMissingException e, HttpServletRequest request) {
-        log.warn("报价单模板缺失 {} {} orderId={}", request.getMethod(), request.getRequestURI(), e.getOrderId());
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("code", "QUOTATION_TEMPLATE_MISSING");
-        body.put("message", "报价单模板缺失，无法生成报价单摘要");
-        body.put("orderId", e.getOrderId());
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
-    }
 
     @ExceptionHandler(Exception.class)
     public void handle(Exception e, HttpServletRequest request, HttpServletResponse response) throws IOException {

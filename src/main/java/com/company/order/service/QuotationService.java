@@ -23,8 +23,6 @@ import java.util.UUID;
  * <ul>
  *   <li><b>场景1</b> {@link #generateQuotation}：{@code quotation.temp-leak} 曾被用于跳过临时文件清理 → 磁盘写满。
  *       现已修复：临时文件的清理不再受任何开关影响（见 {@link #generateQuotation} 的 finally）。</li>
- *   <li><b>场景3</b> {@link #quotationSummary}：模板加载失败返回 null，未判空直接调用 → NPE。
- *       现已修复：null 被收敛为 {@link QuotationTemplateMissingException}（见 {@link #loadTemplate}）。</li>
  *   <li><b>场景4</b> {@link #formatDeliveryDate}：{@code static} 共享的 {@link SimpleDateFormat}，并发下算错日期/抛异常。</li>
  *   <li><b>场景5</b> {@link #generateQuotation} 与 {@link #cleanExpiredFiles}：两把锁的获取顺序相反（ABBA）→ 死锁。</li>
  *   <li><b>场景6</b> {@link #generateQuotation}：参数校验失败（调用方问题）却记 ERROR → 误报洪水。</li>
@@ -332,41 +330,18 @@ public class QuotationService {
         return String.format("SKU-%05d", i);
     }
 
-    /**
-     * 报价单摘要（场景3 被测）。
-     *
-     * <p>修复（场景3 未判空 NPE）：{@link #loadTemplate} 的返回值先判空，
-     * null 一律收敛为带 orderId 的 {@link QuotationTemplateMissingException}，
-     * 不再对 null 调用 {@code trim()} 抛出裸 NPE。
-     *
-     * @throws QuotationTemplateMissingException 模板缺失（loadTemplate 返回 null）
-     */
+    /** 报价单摘要（场景3 被测）。 */
     public String quotationSummary(String orderId) {
         String template = loadTemplate(orderId);
-        if (template == null) {
-            // 兜底：loadTemplate 的实现若未按契约抛异常而返回 null，也不能让 null 外泄到 trim()
-            log.error("报价单模板缺失，无法渲染摘要 orderId={}", orderId);
-            throw new QuotationTemplateMissingException(orderId);
-        }
         log.info("渲染报价单摘要 orderId={}", orderId);
+        // ⚠️ 场景3 bug 注入点：模板加载失败返回 null，这里未判空直接调用 → NullPointerException
         return template.trim();
     }
 
-    /**
-     * 模拟模板仓库/配置中心查询：查不到时**抛受控业务异常**而不是返回 null。
-     *
-     * <p>修复（场景3）：原实现「加载失败返回 null」使 null 外泄到 {@code quotationSummary}
-     * 的 {@code trim()} → NPE。现在失败路径统一记带 orderId 的 ERROR 并抛
-     * {@link QuotationTemplateMissingException}，保证不再向调用方返回 null。
-     *
-     * <p>可见性从 {@code private} 放宽为包内可见，便于单测替换实现以覆盖
-     * 「模板正常」「实现返回 null」两条路径。
-     *
-     * @throws QuotationTemplateMissingException 模板仓库未返回模板
-     */
-    String loadTemplate(String orderId) {
-        log.error("报价单模板加载失败，模板仓库未返回模板 orderId={}", orderId);
-        throw new QuotationTemplateMissingException(orderId);
+    /** 模拟模板仓库/配置中心查询：查不到时返回 null（不做兜底） */
+    private String loadTemplate(String orderId) {
+        log.warn("报价单模板加载失败，返回 null orderId={}", orderId);
+        return null;
     }
 
     /** 供 /test/leak 快速填盘 */

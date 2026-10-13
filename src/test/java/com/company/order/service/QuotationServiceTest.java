@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * QuotationService 单元测试（场景1、3、4、5、6、7 的被测服务）。
+ * QuotationService 单元测试（场景1、4、5、6、7 的被测服务）。
  *
  * <p>不起 Spring 上下文：{@code @Value} 字段直接注，测的是**类自己的行为**，毫秒级完成。
  * 要测装配/HTTP 层应另开 {@code @SpringBootTest}。
@@ -119,61 +119,6 @@ class QuotationServiceTest {
         assertThat(countOf(tmp, "leak_")).isEqualTo(3);
         // 与报价单是两套文件，别互相混淆
         assertThat(countOf(tmp, "quotation_")).isZero();
-    }
-
-    // ------------------------------------------------------------------
-    // 场景3：模板缺失时判空抛受控异常（原为：loadTemplate 返回 null → trim() → NPE）
-    // ------------------------------------------------------------------
-
-    @Test
-    void quotationSummary_returnsTrimmedTemplateWhenTemplatePresent() {
-        // 正常路径：模板存在时照常返回（trim 后）。
-        QuotationService svc = new QuotationService() {
-            @Override
-            String loadTemplate(String orderId) {
-                return "  - {ITEM}";
-            }
-        };
-
-        assertThat(svc.quotationSummary("ORD-2001")).isEqualTo("- {ITEM}");
-    }
-
-    @Test
-    void quotationSummary_throwsControlledExceptionWhenTemplateMissing(@TempDir Path tmp) {
-        // 真实实现路径：loadTemplate 查不到模板 → 抛受控业务异常，且**不能**是 NPE。
-        ListAppender<ILoggingEvent> appender = attach();
-        try {
-            QuotationService svc = service(tmp, false);
-
-            assertThatThrownBy(() -> svc.quotationSummary("ORD-2002"))
-                    .isInstanceOf(QuotationTemplateMissingException.class)
-                    .isNotInstanceOf(NullPointerException.class)
-                    .hasMessageContaining("ORD-2002");
-
-            // 失败日志带 orderId，便于排障（不再是 "Cannot invoke ... because template is null" 的 NPE 栈）
-            assertThat(appender.list)
-                    .filteredOn(e -> e.getLevel() == Level.ERROR)
-                    .extracting(ILoggingEvent::getFormattedMessage)
-                    .anyMatch(m -> m.contains("ORD-2002"));
-        } finally {
-            detach(appender);
-        }
-    }
-
-    @Test
-    void quotationSummary_throwsControlledExceptionWhenTemplateLoaderReturnsNull() {
-        // 兜底路径：loadTemplate 若违反契约返回 null，null 也不得外泄到 trim()。
-        QuotationService svc = new QuotationService() {
-            @Override
-            String loadTemplate(String orderId) {
-                return null;
-            }
-        };
-
-        assertThatThrownBy(() -> svc.quotationSummary("ORD-2003"))
-                .isInstanceOf(QuotationTemplateMissingException.class)
-                .isNotInstanceOf(NullPointerException.class)
-                .hasMessageContaining("ORD-2003");
     }
 
     @Test
