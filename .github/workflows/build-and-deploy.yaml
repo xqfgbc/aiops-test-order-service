@@ -12,6 +12,9 @@ jobs:
   build-push-deploy:
     runs-on: ubuntu-latest
     steps:
+      # ── ⓪ 检出源码（之前缺的就是这步）──
+      - name: Checkout code
+        uses: actions/checkout@v4
       # ── ① OIDC 换 AWS 临时凭证（核心步骤）──
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
