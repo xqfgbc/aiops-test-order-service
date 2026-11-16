@@ -29,7 +29,7 @@ jobs:
       # ── ⓪.3 编译打 jar，生成 build/libs/order-service-0.0.1-SNAPSHOT.jar ──
       - name: Build with Gradle
         run: ./gradlew build -x test
-        
+
       # ── ① OIDC 换 AWS 临时凭证（核心步骤）──
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -40,6 +40,19 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+      # ── ②.1 在 workflow 里禁用 containerd snapshotter
+      - name: Disable containerd image store
+        run: |
+          DAEMON_JSON="/etc/docker/daemon.json"
+          if [ -f "$DAEMON_JSON" ]; then
+            sudo jq '. + {"features": {"containerd-snapshotter": false}}' "$DAEMON_JSON" \
+              | sudo tee "${DAEMON_JSON}.tmp" > /dev/null
+            sudo mv "${DAEMON_JSON}.tmp" "$DAEMON_JSON"
+          else
+            echo '{"features": {"containerd-snapshotter": false}}' \
+              | sudo tee "$DAEMON_JSON" > /dev/null
+          fi
+          sudo systemctl restart docker
       # ── ③ 构建并推送镜像 ──
       - name: Build, tag, and push image to Amazon ECR
         id: build
